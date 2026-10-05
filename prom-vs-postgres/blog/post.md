@@ -338,7 +338,7 @@ make build
 make bench
 ```
 
-Harness, raw JSON and CI: REPO_URL
+Harness, raw JSON and CI: <https://github.com/hungpham10/my-benchmarks/prom-vs-postgres>
 
 The recorded run used 100 iterations per cell rather than the 300 in `.env`, to
 keep it under a sane wall-clock budget. `results/query.json` has the real count.

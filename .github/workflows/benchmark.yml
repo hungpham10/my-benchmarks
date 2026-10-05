@@ -45,6 +45,13 @@ jobs:
     timeout-minutes: 120
     runs-on: ubuntu-latest
 
+    # Everything the benchmark needs lives in one subdirectory, but GitHub only
+    # reads workflows from ./.github/workflows. So the workflow sits at the repo
+    # root and points the shell at the benchmark.
+    defaults:
+      run:
+        working-directory: prom-vs-postgres
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -103,8 +110,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: results-${{ inputs.scale || 'full' }}-${{ github.run_number }}
-          path: results/
+          path: prom-vs-postgres/results/
           if-no-files-found: error
+          retention-days: 90
 
       - name: Summarise
         if: always()
