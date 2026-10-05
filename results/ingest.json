@@ -1,0 +1,14 @@
+[
+ {
+  "target": "metrics_jsonb",
+  "samples": 3600000,
+  "seconds": 25.186,
+  "samples_per_second": 142937.2
+ },
+ {
+  "target": "metrics_norm_brin",
+  "samples": 3600000,
+  "seconds": 10.517,
+  "samples_per_second": 342287.8
+ }
+]

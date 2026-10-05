@@ -1,0 +1,121 @@
+# Prometheus vs PostgreSQL metrics benchmark.
+#
+# Manual + nightly, deliberately NOT on push. The query phase alone is ~36
+# minutes at full scale, and every run competes for the same fixed runner
+# cores, so a per-push trigger would make the numbers depend on how many other
+# jobs happened to be queued.
+#
+# Why not the free-tier 2 CPU / 7 GB runners: the envelope in .env gives each
+# target under test 1.5 CPU / 4 GB. Two targets plus a runner plus the OS need
+# 16 GB. On a 7 GB runner the runner itself becomes the bottleneck and the
+# "resource consumption" numbers would measure the runner.
+
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: Benchmark scale
+        type: choice
+        options: [smoke, full]
+        default: full
+      publish:
+        description: Commit results/ back to the default branch
+        type: boolean
+        default: false
+  schedule:
+    # 03:17 UTC nightly. Off the hour so it does not queue behind everyone
+    # else's midnight jobs.
+    - cron: "17 3 * * *"
+  # No pull_request trigger: see above.
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time. Two concurrent benches would measure each other.
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    # ~40 min full scale: build (~2) + up (~1) + ingest (~1) + footprint +
+    # query (~36) + parity (~1). 120 leaves room for a slow pull day.
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Report runner capacity
+        # The envelope is only meaningful if the machine can actually honour
+        # it. Fail loudly rather than silently producing numbers that measure
+        # the runner.
+        run: |
+          nproc
+          free -g | head -2
+          df -h "$RUNNER_TEMP" | tail -1
+
+      - name: Configure scale
+        run: |
+          if [ "${{ inputs.scale }}" = "smoke" ]; then
+            {
+              echo 'JOBS=2'
+              echo 'INSTANCES_PER_JOB=5'
+              echo 'WINDOW_MINUTES=15'
+              echo 'QUERY_ITERATIONS=30'
+              echo 'QUERY_WARMUP=5'
+            } >> "$GITHUB_ENV"
+            echo "smoke scale selected"
+          else
+            echo "full scale selected"
+          fi
+
+      - name: Build the bench image
+        run: make build
+
+      - name: Run the benchmark
+        # dataset.json must not exist: every phase reuses the timestamp anchor
+        # in it, and a committed one is hours old by the time CI runs.
+        # Prometheus rejects samples older than MaxTime - chunkRange/2 (~1h).
+        run: |
+          rm -f results/dataset.json
+          make bench
+
+      - name: Tear down
+        # Always, even on failure: `make bench` does not stop the stack, and a
+        # failed job would otherwise leave containers running.
+        if: always()
+        run: make down || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ inputs.scale || 'full' }}-${{ github.run_number }}
+          path: results/
+          if-no-files-found: error
+
+      - name: Summarise
+        if: always()
+        run: |
+          echo "### benchmark summary" >> "$GITHUB_STEP_SUMMARY"
+          [ -f results/report.md ] && cat results/report.md >> "$GITHUB_STEP_SUMMARY" \
+            || echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit results back
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        permissions:
+          contents: write
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results/
+          if git diff --cached --quiet; then
+            echo "no change in results/"
+            exit 0
+          fi
+          git commit -m "bench: results from run ${{ github.run_number }}"
+          git push

@@ -1,0 +1,28 @@
+{
+ "prometheus": {
+  "seconds": 14.39,
+  "prometheus": {
+   "cpu_pct_avg": 9.0,
+   "cpu_pct_peak": 16.0,
+   "mem_bytes_peak": 227855564
+  },
+  "postgres": {
+   "cpu_pct_avg": 1.0,
+   "cpu_pct_peak": 3.9,
+   "mem_bytes_peak": 62631444
+  }
+ },
+ "postgres": {
+  "seconds": 40.29,
+  "prometheus": {
+   "cpu_pct_avg": 0.5,
+   "cpu_pct_peak": 1.4,
+   "mem_bytes_peak": 263297433
+  },
+  "postgres": {
+   "cpu_pct_avg": 62.9,
+   "cpu_pct_peak": 83.7,
+   "mem_bytes_peak": 817889280
+  }
+ }
+}

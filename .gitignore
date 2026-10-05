@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+.DS_Store
+*.swp
+*~
+
+# Named Docker volumes are managed by compose, but a bind-mount misconfiguration
+# can leave real data directories behind. results/ is deliberately NOT ignored:
+# it is the record of the run, and dataset.json now carries the timestamp anchor
+# that every later phase reuses.
+/prom-data/
+/pg-data/

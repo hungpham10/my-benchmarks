@@ -1,0 +1,30 @@
+{
+ "envelope": {
+  "cpus_per_target": "1.5",
+  "memory_per_target": "4G",
+  "note": "identical budget for both systems; see docker-compose.yml"
+ },
+ "scale": {
+  "JOBS": "20",
+  "INSTANCES_PER_JOB": "500",
+  "INTERVAL_SECONDS": "15",
+  "WINDOW_MINUTES": "45",
+  "AHEAD_MINUTES": "8",
+  "SEED": "20240101"
+ },
+ "query": {
+  "QUERY_ITERATIONS": "300",
+  "QUERY_WARMUP": "20",
+  "QUERY_TIMEOUT_S": "120"
+ },
+ "images": {
+  "prometheus": {
+   "tag": "prom/prometheus:latest",
+   "id": "sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e"
+  },
+  "postgres": {
+   "tag": "postgres:latest",
+   "id": "sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722"
+  }
+ }
+}

@@ -1,0 +1,24 @@
+# Deliberately scrapes nothing.
+#
+# A 5s self-scrape would add roughly a thousand `prometheus_*` and `go_*`
+# series to the same TSDB that is being measured. They would land in the same
+# blocks as the benchmark dataset and inflate the bytes-per-sample figure that
+# this harness exists to produce, while PostgreSQL has no equivalent rows to
+# compare against. The disk comparison is only honest if both sides hold
+# exactly the dataset and nothing else.
+#
+# Side benefit: no continuous writes to the head, so compaction behaviour is
+# driven only by the ingest pass.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+# Set here rather than via --storage.tsdb.retention.time, which is deprecated
+# upstream. The value only has to exceed the data window; the benchmark writes
+# 6h of future-dated samples and measures them immediately.
+storage:
+  tsdb:
+    retention:
+      time: 30d
+
+scrape_configs: []

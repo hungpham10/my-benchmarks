@@ -1,0 +1,133 @@
+# Prometheus vs PostgreSQL for metric storage and querying.
+#
+# Three services, and only two of them are under test: Prometheus and
+# PostgreSQL. The third runs the ingest pass and the query suite, one after
+# the other, so the two databases are never competing for the same cores
+# while a measurement is being taken.
+#
+# Both systems get an IDENTICAL resource envelope: ${TARGET_CPUS} CPUs and
+# ${TARGET_MEMORY} each, out of the 4 vCPU / 10 GB the VM provides. This is
+# what makes the comparison a comparison. Uncapped, Prometheus could spend
+# three times the RAM PostgreSQL uses and still be declared the winner, and
+# "peak memory" would measure the ceiling of the machine rather than of either
+# design. The leftover core and ~2 GB go to the bench runner and the OS.
+#
+# Consequence to keep in mind when reading results: a query that OOMs or
+# starves on CPU is a real property of "what fits in this envelope", not a
+# measurement artefact. That is the number a reader actually cares about.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: bench-prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "${TARGET_CPUS}"
+          memory: ${TARGET_MEMORY}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # No block-range flag: it was removed upstream. The head chunk range is
+      # now min-block-duration (default 2h, which is what the compaction maths
+      # assumes), and block ranges are ExponentialBlockRanges(min, 10, 3) --
+      # 2h, 6h, 18h, 54h. Retention moved to prometheus.yml because
+      # --storage.tsdb.retention.time is deprecated.
+      - --web.enable-remote-write-receiver
+      - --web.enable-lifecycle
+      - --query.max-samples=50000000
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prom-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:latest
+    container_name: bench-postgres
+    deploy:
+      resources:
+        limits:
+          cpus: "${TARGET_CPUS}"
+          memory: ${TARGET_MEMORY}
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - min_wal_size=512MB
+      - -c
+      - track_io_timing=on
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      # PostgreSQL 18 moved the data directory under a version-specific
+      # subdirectory, so the mount point moved up one level. Mounting at
+      # /var/lib/postgresql/data makes the image treat the volume as unused and
+      # refuse to start.
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Ingest pass (INGEST_TARGETS) and query suite. One service, one image, two
+  # commands: the caller picks the script, so the phases stay sequential.
+  bench:
+    build: .
+    container_name: bench-runner
+    profiles: ["ingest", "bench"]
+    environment:
+      PROM_URL: http://prometheus:9090
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: bench
+      PG_PASSWORD: bench
+      PG_DATABASE: bench
+      JOBS: "${JOBS}"
+      INSTANCES_PER_JOB: "${INSTANCES_PER_JOB}"
+      INTERVAL_SECONDS: "${INTERVAL_SECONDS}"
+      WINDOW_MINUTES: "${WINDOW_MINUTES}"
+      AHEAD_MINUTES: "${AHEAD_MINUTES}"
+      SEED: "${SEED}"
+      JITTER_MS: "${JITTER_MS:-0}"
+      TARGETS: "${INGEST_TARGETS:-all}"
+      SERIES_CHUNK: "${SERIES_CHUNK:-1000}"
+      SCRAPES_PER_REQUEST: "${SCRAPES_PER_REQUEST:-240}"
+      QUERY_ITERATIONS: "${QUERY_ITERATIONS}"
+      QUERY_WARMUP: "${QUERY_WARMUP}"
+      QUERY_TIMEOUT_S: "${QUERY_TIMEOUT_S:-120}"
+      RESULTS_DIR: /results
+    volumes:
+      - ./results:/results
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  prom-data:
+  pg-data:

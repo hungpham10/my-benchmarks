@@ -1,0 +1,26 @@
+{
+ "metric": "queue_depth",
+ "expected_samples": 1800000,
+ "prometheus": {
+  "count": 1800000.0,
+  "sum": 183888348.74288797,
+  "min": 0.0,
+  "max": 209.0787043564088
+ },
+ "postgres": {
+  "metrics_jsonb": {
+   "count": 1800000,
+   "sum": 183888348.74289292,
+   "min": 0.0,
+   "max": 209.0787043564088
+  },
+  "metrics_norm_brin": {
+   "count": 1800000,
+   "sum": 183888348.7428941,
+   "min": 0.0,
+   "max": 209.0787043564088
+  }
+ },
+ "passed": true,
+ "failures": []
+}

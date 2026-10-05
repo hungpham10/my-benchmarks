@@ -1,0 +1,28 @@
+{
+ "t_start_ms": 1791173910000,
+ "t_end_ms": 1791176595000,
+ "samples_per_series": 180,
+ "samples": 180,
+ "total_series": 20000,
+ "series_gauge": 10000,
+ "total_samples": 3600000,
+ "interval_seconds": 15,
+ "jobs": 20,
+ "instances_per_job": 500,
+ "seed": 20240101,
+ "jitter_ms": 0,
+ "scale": [
+  20,
+  500,
+  45,
+  15,
+  20240101,
+  0,
+  8.0
+ ],
+ "targets": [
+  "metrics_jsonb",
+  "metrics_norm_brin",
+  "prometheus"
+ ]
+}

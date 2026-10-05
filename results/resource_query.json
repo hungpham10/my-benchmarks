@@ -1,0 +1,16 @@
+{
+ "seconds": 2163.08,
+ "peak": {
+  "prometheus": {
+   "cpu_pct_avg": 1.6,
+   "cpu_pct_peak": 101.7,
+   "mem_bytes_peak": 248302796
+  },
+  "postgres": {
+   "cpu_pct_avg": 104.4,
+   "cpu_pct_peak": 156.4,
+   "mem_bytes_peak": 1338956054
+  }
+ },
+ "exit_code": 0
+}
