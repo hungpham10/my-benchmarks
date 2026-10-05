@@ -1,19 +1,33 @@
-# Prometheus vs PostgreSQL for Metrics: What I Actually Measured
+# Can we use Postgres for storing and querying metrics instead of Prometheus?
 
-Everyone has an opinion on whether you can keep metrics in PostgreSQL. I wanted
-numbers instead, so I built a harness that loads one deterministic dataset into
-Prometheus and into two carefully-designed PostgreSQL schemas, then measures
-disk, latency and resource use under an identical resource envelope.
+I recently sat in a technical interview and got a deceptively simple question:
 
-The short version: **Prometheus uses 59.9x less disk and wins 9 of the 11
-dimensions I compared. PostgreSQL wins the two it should** — percentiles over
-many series, and single-series short-range reads. Neither result is as
-interesting as the reason behind them.
+> *Why Prometheus or InfluxDB for metrics, and not PostgreSQL?*
 
-Everything below comes from one real run. The harness, the raw JSON and the CI
-workflow are in the repository linked at the end, so every number is checkable.
+"Of course you can," I said. But that is where it gets interesting — Postgres
+can absolutely store metrics. The real question is what it gives up in order to
+do that, and what Prometheus gave up in order to avoid doing it.
 
-<!-- - PromQL/SQL for each shape are in bench/queries.py; the numbers here are from results/ -->
+So I did two things. First I read the TSDB source to find out what Prometheus
+actually builds. Then I built a harness and measured the difference.
+
+There are two answers here, at two different levels.
+
+**The architectural answer** is that Prometheus is small and fast because of one
+assumption it is allowed to make and Postgres is not: that samples arrive in
+time order. That single assumption is worth roughly 60x on disk, and it shows up
+all over the codebase — the chunk encoder, the label index, the compaction path.
+
+**The measured answer** comes from a harness that loaded one deterministic
+3.6M-sample dataset into Prometheus and into two carefully designed PostgreSQL
+schemas, then measured disk, latency and resource use under an identical
+envelope. Prometheus won 9 of the 11 dimensions I compared. PostgreSQL won the
+two it should — percentiles over many series, and single-series short reads.
+
+Neither half is much use alone. The architecture explains *why* the numbers come
+out where they do, including the two shapes where Postgres still wins. Everything
+below comes from one real run; the harness, the raw JSON and the CI workflow are
+public, so every number is checkable.
 
 ## Why metric data is not relational data
 
