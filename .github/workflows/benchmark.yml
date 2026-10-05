@@ -77,11 +77,19 @@ jobs:
         run: make build
 
       - name: Run the benchmark
-        # dataset.json must not exist: every phase reuses the timestamp anchor
-        # in it, and a committed one is hours old by the time CI runs.
-        # Prometheus rejects samples older than MaxTime - chunkRange/2 (~1h).
+        # Start from an empty results/, not just a missing dataset.json. The
+        # committed results/ is the record of the previous run, and every phase
+        # writes independently, so a run that dies after ingest would leave the
+        # previous query.json and report.md in place and the upload step would
+        # publish stale numbers as if they were fresh.
+        #
+        # dataset.json in particular must not survive: later phases reuse its
+        # timestamp anchor, and a committed one is hours old by the time CI
+        # runs. Prometheus rejects samples older than MaxTime - chunkRange/2
+        # (~1h at the default 2h chunk range).
         run: |
-          rm -f results/dataset.json
+          rm -rf results
+          mkdir -p results
           make bench
 
       - name: Tear down
