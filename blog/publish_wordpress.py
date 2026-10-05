@@ -150,6 +150,17 @@ def fallback_html(markdown_text):
                 list_mode = "ol"
             out.append("<li>%s</li>" % inline(re.sub(r"^\d+\. ", "", stripped)))
 
+        elif stripped.startswith(">"):
+            flush_paragraph()
+            close_list()
+            quoted = []
+            while index < len(lines) and lines[index].strip().startswith(">"):
+                quoted.append(re.sub(r"^>\s?", "", lines[index].strip()))
+                index += 1
+            index -= 1
+            out.append("<blockquote><p>%s</p></blockquote>"
+                       % inline(" ".join(q.strip() for q in quoted).strip()))
+
         elif stripped.startswith("<!--"):
             while index < len(lines) and "-->" not in lines[index]:
                 index += 1
