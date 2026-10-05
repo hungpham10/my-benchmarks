@@ -14,3 +14,6 @@ venv/
 # that every later phase reuses.
 /prom-data/
 /pg-data/
+
+# Rendered from blog/post.md by blog/publish_wordpress.py --dry-run.
+blog/post.html
