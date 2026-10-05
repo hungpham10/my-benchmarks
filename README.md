@@ -190,3 +190,4 @@ test the two structural findings in the write-up:
 | `footprint` reports 0 bytes | The containers are down, or `du` failed; check `results/footprint.json` for `null`. |
 | `build` fails on pip | No network. The image build needs PyPI. |
 | Ports already bound | Change `PROMETHEUS_PORT` / `POSTGRES_PORT` in `.env`. |
+| Prometheus restart-loops: `open /etc/prometheus/prometheus.yml: no such file or directory` | The config bind mount resolved to nothing. Colima and Docker Desktop share only your home directory into the VM, so a checkout under `/tmp` mounts an empty directory. Keep the repo under `/Users` or `~`. |
