@@ -10,15 +10,15 @@ Images under test (`:latest`, so the digest is what makes this run reproducible)
 
 | System | Image ID (pinned by this run) |
 | --- | --- |
-| prometheus | `sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e` |
-| postgres | `sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722` |
+| prometheus | `sha256:66416213a3b43651d3521acc3987277b4f97ad0ae29acc581f910ef9bd3959bd` |
+| postgres | `sha256:662db3da228c2ea2649b3ae04db4b4479e85fea5979f6a917a7f6d5cb1e7ec39` |
 
 | Parameter | Value |
 | --- | --- |
 | Series | 20,000 |
 | Samples per series | 180 |
 | Total samples | 3,600,000 |
-| Window (ms) | 1791173910000 .. 1791176595000 |
+| Window (ms) | 1791253515000 .. 1791256200000 |
 
 ## 0. Parity
 
@@ -39,7 +39,7 @@ Prometheus currently holds **0 compacted blocks**. The window never reached the 
 | Target | On disk | Per sample |
 | --- | --- | --- |
 | Prometheus | 16.0 MiB | **4.67 B** |
-| PostgreSQL (both schemas) | 960.3 MiB | **279.72 B** |
+| PostgreSQL (both schemas) | 960.5 MiB | **279.76 B** |
 
 PostgreSQL occupies **59.9x** more disk for the same 3,600,000 samples.
 
@@ -47,15 +47,15 @@ PostgreSQL, per relation (heap excludes indexes):
 
 | Relation | Heap | Indexes | Index/heap |
 | --- | --- | --- | --- |
-| `metrics_jsonb_20261005` | 589.4 MiB | 48.5 MiB | 0.08 |
-| `metrics_norm_brin_20261005` | 179.7 MiB | 108.8 MiB | 0.61 |
+| `metrics_jsonb_20261006` | 589.4 MiB | 48.5 MiB | 0.08 |
+| `metrics_norm_brin_20261006` | 179.7 MiB | 108.8 MiB | 0.61 |
 | **total** | **769.1 MiB** | **157.2 MiB** | **0.20** |
 
 WAL, excluded above because it is transient rather than a property of the stored data: Prometheus 45.4 MiB, PostgreSQL 1.9 GiB.
 
 ## 2. Query latency
 
-Warm, serial, single connection. 100 iterations per cell after 10 warmup executions, Prometheus stepped at 300s so both sides return comparable row counts.
+Warm, serial, single connection. 300 iterations per cell after 20 warmup executions, Prometheus stepped at 300s so both sides return comparable row counts.
 
 ### q1_counter_rate
 
@@ -63,11 +63,11 @@ _Counter rate across every counter series. Prometheus walks an already-sorted sl
 
 | Target | p50 | p75 | p95 | p99 | max | rows |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prometheus | 132.0 ms | 137.6 ms | 160.2 ms | 164.7 ms | 165.4 ms | 8 |
-| Postgres jsonb | 16.09 s | 16.13 s | 16.18 s | 16.21 s | 16.31 s | 1 |
-| Postgres norm+BRIN | 1.25 s | 1.25 s | 1.26 s | 1.28 s | 1.29 s | 1 |
+| Prometheus | 136.5 ms | 149.2 ms | 165.4 ms | 171.7 ms | 183.2 ms | 8 |
+| Postgres jsonb | 16.17 s | 16.20 s | 16.27 s | 16.31 s | 16.34 s | 1 |
+| Postgres norm+BRIN | 1.52 s | 1.55 s | 1.59 s | 1.62 s | 1.63 s | 1 |
 
-Fastest p95: **Prometheus** at 160.2 ms.
+Fastest p95: **Prometheus** at 165.4 ms.
 
 ### q2_sum_by_job
 
@@ -75,11 +75,11 @@ _Grouped aggregation across many series. The plain case, where both engines are 
 
 | Target | p50 | p75 | p95 | p99 | max | rows |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prometheus | 90.6 ms | 94.1 ms | 117.1 ms | 118.6 ms | 118.8 ms | 180 |
-| Postgres jsonb | 1.10 s | 1.13 s | 1.14 s | 1.14 s | 1.18 s | 20 |
-| Postgres norm+BRIN | 573.0 ms | 583.7 ms | 606.0 ms | 618.3 ms | 626.6 ms | 20 |
+| Prometheus | 96.5 ms | 106.6 ms | 117.0 ms | 120.2 ms | 138.2 ms | 180 |
+| Postgres jsonb | 1.12 s | 1.13 s | 1.14 s | 1.16 s | 1.18 s | 20 |
+| Postgres norm+BRIN | 799.3 ms | 816.4 ms | 885.0 ms | 900.6 ms | 909.9 ms | 20 |
 
-Fastest p95: **Prometheus** at 117.1 ms.
+Fastest p95: **Prometheus** at 117.0 ms.
 
 ### q3_p90
 
@@ -87,11 +87,11 @@ _Per-series p90 over a sliding hour. Postgres sorts in the database and has no s
 
 | Target | p50 | p75 | p95 | p99 | max | rows |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prometheus | 41.9 ms | 66.0 ms | 86.2 ms | 89.0 ms | 90.1 ms | 4,500 |
-| Postgres jsonb | 243.2 ms | 244.6 ms | 246.7 ms | 247.3 ms | 248.3 ms | 500 |
-| Postgres norm+BRIN | 35.4 ms | 35.5 ms | 35.8 ms | 36.5 ms | 40.0 ms | 500 |
+| Prometheus | 38.5 ms | 61.8 ms | 72.6 ms | 74.4 ms | 79.4 ms | 4,500 |
+| Postgres jsonb | 198.2 ms | 199.1 ms | 204.7 ms | 212.8 ms | 218.6 ms | 500 |
+| Postgres norm+BRIN | 35.0 ms | 35.3 ms | 36.3 ms | 40.7 ms | 44.4 ms | 500 |
 
-Fastest p95: **Postgres norm+BRIN** at 35.8 ms.
+Fastest p95: **Postgres norm+BRIN** at 36.3 ms.
 
 ### q4_selective_wide
 
@@ -99,11 +99,11 @@ _One job selected across the whole retention window. Prometheus resolves it thro
 
 | Target | p50 | p75 | p95 | p99 | max | rows |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prometheus | 5.0 ms | 5.3 ms | 8.1 ms | 10.3 ms | 11.5 ms | 9 |
-| Postgres jsonb | 216.6 ms | 218.2 ms | 220.0 ms | 222.8 ms | 224.0 ms | 1 |
-| Postgres norm+BRIN | 17.0 ms | 17.4 ms | 17.6 ms | 17.8 ms | 17.8 ms | 1 |
+| Prometheus | 5.2 ms | 5.7 ms | 7.7 ms | 8.5 ms | 10.6 ms | 9 |
+| Postgres jsonb | 174.1 ms | 174.8 ms | 180.0 ms | 186.2 ms | 205.9 ms | 1 |
+| Postgres norm+BRIN | 16.2 ms | 16.5 ms | 17.4 ms | 20.1 ms | 27.2 ms | 1 |
 
-Fastest p95: **Prometheus** at 8.1 ms.
+Fastest p95: **Prometheus** at 7.7 ms.
 
 ### q5_short_range
 
@@ -111,11 +111,11 @@ _A single series over 15 minutes. One block, few rows, good planner: the case wh
 
 | Target | p50 | p75 | p95 | p99 | max | rows |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prometheus | 0.7 ms | 0.8 ms | 0.9 ms | 0.9 ms | 1.0 ms | 80 |
-| Postgres jsonb | 62.8 ms | 63.9 ms | 65.3 ms | 66.4 ms | 66.5 ms | 1 |
-| Postgres norm+BRIN | 0.5 ms | 0.5 ms | 0.5 ms | 0.5 ms | 0.6 ms | 1 |
+| Prometheus | 1.0 ms | 1.0 ms | 1.0 ms | 1.1 ms | 1.5 ms | 80 |
+| Postgres jsonb | 44.7 ms | 45.1 ms | 46.0 ms | 49.9 ms | 52.2 ms | 1 |
+| Postgres norm+BRIN | 0.5 ms | 0.7 ms | 0.8 ms | 1.0 ms | 2.5 ms | 1 |
 
-Fastest p95: **Postgres norm+BRIN** at 0.5 ms.
+Fastest p95: **Postgres norm+BRIN** at 0.8 ms.
 
 ## 3. Resource use
 
@@ -123,15 +123,15 @@ Fastest p95: **Postgres norm+BRIN** at 0.5 ms.
 
 | Target | Wall time | CPU (avg / peak) | Peak memory |
 | --- | --- | --- | --- |
-| Prometheus | 14.4 s | 9.0% / 16.0% | 217.3 MiB |
-| PostgreSQL (both schemas) | 40.3 s | 62.9% / 83.7% | 780.0 MiB |
+| Prometheus | 16.1 s | 9.9% / 15.4% | 285.9 MiB |
+| PostgreSQL (both schemas) | 43.8 s | 61.9% / 93.4% | 792.6 MiB |
 
-**During the query phase** — the full 100-iteration suite, 2163.1 s wall:
+**During the query phase** — the full 300-iteration suite, 6517.8 s wall:
 
 | Target | CPU (avg / peak) | Peak memory |
 | --- | --- | --- |
-| Prometheus | 1.6% / 101.7% | 236.8 MiB |
-| PostgreSQL (both schemas) | 104.4% / 156.4% | 1.2 GiB |
+| Prometheus | 2.2% / 103.5% | 292.9 MiB |
+| PostgreSQL (both schemas) | 105.7% / 156.7% | 1.2 GiB |
 
 ## Caveats to carry into the write-up
 

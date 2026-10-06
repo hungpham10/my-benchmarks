@@ -2,23 +2,23 @@
  "total_samples": 3600000,
  "prometheus_blocks": 0,
  "prometheus": {
-  "bytes": 16803891,
+  "bytes": 16803250,
   "wal_bytes": 47560262,
-  "raw_bytes": 64364153,
+  "raw_bytes": 64363512,
   "bytes_per_sample": 4.67
  },
  "postgres": {
-  "bytes": 1006983327,
+  "bytes": 1007144271,
   "wal_bytes": 2046820352,
-  "raw_bytes": 3053803679,
-  "bytes_per_sample": 279.72
+  "raw_bytes": 3053964623,
+  "bytes_per_sample": 279.76
  },
  "tables": {
-  "metrics_jsonb_20261005": {
+  "metrics_jsonb_20261006": {
    "heap_bytes": 618053632,
    "index_bytes": 50814976
   },
-  "metrics_norm_brin_20261005": {
+  "metrics_norm_brin_20261006": {
    "heap_bytes": 188416000,
    "index_bytes": 114049024
   }

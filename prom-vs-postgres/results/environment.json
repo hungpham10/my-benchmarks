@@ -20,11 +20,11 @@
  "images": {
   "prometheus": {
    "tag": "prom/prometheus:latest",
-   "id": "sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e"
+   "id": "sha256:66416213a3b43651d3521acc3987277b4f97ad0ae29acc581f910ef9bd3959bd"
   },
   "postgres": {
    "tag": "postgres:latest",
-   "id": "sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722"
+   "id": "sha256:662db3da228c2ea2649b3ae04db4b4479e85fea5979f6a917a7f6d5cb1e7ec39"
   }
  }
 }
