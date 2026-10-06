@@ -13,6 +13,11 @@ reader who distrusts the number.
 | --- | --- | --- |
 | [prom-vs-postgres](prom-vs-postgres/) | Should metrics live in Prometheus or PostgreSQL? | [post](https://hungpham10.wordpress.com) |
 
+`prom-vs-postgres` also ships an optional monitoring stack: cAdvisor, a host
+exporter and both databases' own metrics feed a Grafana dashboard, so a run can
+be judged on what it cost the machine as well as how fast it was. See
+[Watching a run](prom-vs-postgres/README.md#watching-a-run).
+
 ## What every benchmark here has in common
 
 - **Equal resource envelopes.** Whatever is under test gets the same CPU and

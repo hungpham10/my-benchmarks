@@ -1,0 +1,202 @@
+// Grafana Alloy, variant B: the local monitoring stack PLUS a push to Grafana
+// Cloud. This is the one that gives a benchmark run a durable record that
+// outlives the machine, the way k6 Cloud keeps results server-side.
+//
+// Generated from config.alloy by monitoring/sync_cloud_config.py. Do not edit
+// by hand: edit config.alloy and re-run that script, or the two drift apart and
+// the local stack and the cloud stack quietly stop measuring the same thing.
+//
+// Credentials come from the environment, never from this file:
+//
+//   GRAFANA_CLOUD_URL     the metrics push URL of your Grafana Cloud stack
+//   GRAFANA_CLOUD_ID      numeric instance (user) ID; the left half of the
+//                         basic-auth username
+//   GRAFANA_CLOUD_TOKEN   access policy token with metrics:write
+//
+// Put them in .env.monitoring, which is gitignored. Start Alloy with this file
+// via ALLOY_CONFIG=config.cloud.alloy, which `make monitor-cloud` does.
+
+// Grafana Alloy — collects the operational metrics of the benchmark run itself.
+//
+// This exists so a run can be judged on two axes at once: "which database is
+// faster" (results/) and "what did doing that cost the machine" (this).
+//
+// Three hard constraints shaped this file:
+//
+//  1. Nothing here may write into the TSDB of the Prometheus under test. That
+//     TSDB is the thing being measured, at 4.67 B/sample against Postgres at
+//     279.76. One scraped target added to it would corrupt the headline number,
+//     so everything goes to a separate monitoring Prometheus.
+//
+//  2. Container metrics come from cAdvisor, which needs no access to the
+//     targets' internals, so this works identically for both systems even
+//     though one exposes /metrics and the other does not.
+//
+//  3. cAdvisor is scraped exactly once. It answers for every container on one
+//     address, so fanning out one target per discovered container and stamping
+//     the discovered name onto the result makes every container's series claim
+//     to be every other container's. See the long note on the scrape block.
+//
+// Validate this file before restarting Alloy:
+//   docker run --rm -v "$PWD/monitoring/alloy:/etc/alloy:ro" \
+//     grafana/alloy:latest validate /etc/alloy/config.alloy
+
+prometheus.exporter.unix "host" {
+  enable_collectors = ["cpu", "filesystem", "meminfo", "diskstats", "netdev", "vmstat"]
+
+  // The benchmark's data volumes. Container CPU and memory come from cAdvisor;
+  // filesystem usage has to be scraped from the host because a container cannot
+  // see its own mount points with useful accuracy.
+  filesystem {
+    fs_types_exclude = "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$"
+  }
+}
+
+// Defining an exporter in Alloy does not scrape it: a scrape job has to name
+// it. Without this block the exporter above is evaluated and thrown away.
+// This is where host-wide CPU, memory and disk usage come from.
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  forward_to      = [prometheus.relabel.trim.receiver]
+  scrape_interval = "10s"
+}
+
+// Per-container CPU and memory, from one cAdvisor endpoint.
+//
+// cAdvisor answers for EVERY container on this single address, and it already
+// labels each series correctly: name="bench-postgres",
+// image="postgres:latest", id="/docker/<sha>". So one scrape.
+//
+// Scraping it once per discovered container and stamping that name onto the
+// result is the obvious approach and it is wrong. Each scrape returns all
+// containers, so every series ends up filed under the name of the container
+// that happened to be discovered for that target. Nothing errors, the panels
+// look entirely plausible, and the symptom is two different containers
+// reporting byte-identical peak memory.
+prometheus.scrape "cadvisor" {
+  targets = [{
+    "__address__"      = "cadvisor:8080",
+    "__metrics_path__" = "/metrics",
+  }]
+
+  forward_to      = [prometheus.relabel.trim.receiver]
+  scrape_interval = "10s"
+
+  // Rules run in order, so the labels worth keeping are copied out under
+  // readable names before the bloat is dropped.
+}
+
+// Prometheus-under-test self-observability. The useful series here are the ones
+// that explain compaction and ingest behaviour over time:
+// prometheus_tsdb_head_series, prometheus_tsdb_samples_appended_total,
+// prometheus_tsdb_wal_fsync_duration_seconds, prometheus_tsdb_blocks_loaded.
+prometheus.scrape "prometheus_under_test" {
+  targets = [{
+    "__address__"      = "bench-prometheus:9090",
+    "__metrics_path__" = "/metrics",
+    "job"              = "prometheus-under-test",
+  }]
+
+  forward_to      = [prometheus.relabel.trim.receiver]
+  scrape_interval = "10s"
+}
+
+// PostgreSQL, through the standard exporter. This is what makes the Postgres
+// side of the dashboard possible at all: pg_stat_statements is already enabled
+// in the compose command line, so statement counts and durations are available
+// without touching the benchmark's own schema.
+prometheus.scrape "postgres" {
+  targets = [{
+    "__address__"      = "postgres-exporter:9187",
+    "__metrics_path__" = "/metrics",
+    "job"              = "postgres-under-test",
+  }]
+
+  forward_to      = [prometheus.relabel.trim.receiver]
+  scrape_interval = "10s"
+}
+
+// Applied to every metric on its way to the remote-write endpoint. Two jobs:
+// make cAdvisor's series readable, then delete the parts nobody reads.
+//
+// Rules run in order and stop at the first match per metric.
+prometheus.relabel "trim" {
+  forward_to = [
+    prometheus.remote_write.monitoring.receiver,
+    prometheus.remote_write.cloud.receiver,
+  ]
+
+  // cAdvisor calls the container name "name", which reads as something else
+  // entirely in a query. Require the Compose service label alongside it so
+  // this only ever touches cAdvisor series: it is the only exporter that
+  // carries that label, and `prometheus.relabel` sits on the shared path.
+  rule {
+    action        = "replace"
+    source_labels = ["name", "container_label_com_docker_compose_service"]
+    regex         = "(.+);.+"
+    target_label  = "container"
+    replacement   = "$1"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["container_label_com_docker_compose_service"]
+    regex         = "(.+)"
+    target_label  = "service"
+    replacement   = "$1"
+  }
+
+  // Roughly 25 Compose labels ride along on every cAdvisor series, including
+  // the absolute path of the project working directory, on a metric that
+  // already emits one series per container per device per CPU.
+  // `labeldrop` takes only `regex`. Passing `source_labels` as well is a decode
+  // error that `alloy validate` does not catch; it only surfaces at runtime, as
+  // "failed to evaluate config" and an empty dashboard.
+  rule {
+    action = "labeldrop"
+    regex  = "container_label_.*"
+  }
+
+  // Per-CPU and per-device breakdowns. No dashboard panel reads them, and on a
+  // shared runner they are the difference between a dashboard that loads and
+  // one that times out.
+  rule {
+    action        = "drop"
+    source_labels = ["__name__"]
+    regex         = "container_(tasks_state|memory_failcnt|blkio_device_usage_total)"
+  }
+}
+
+prometheus.remote_write "monitoring" {
+  endpoint {
+    // The monitoring Prometheus, NOT the one under test. Scraping into the
+    // measured TSDB would move the 4.67 B/sample headline.
+    url = "http://monitoring-prometheus:9090/api/v1/write"
+  }
+
+  external_labels = {
+    source = "benchmark-run",
+  }
+}
+
+// Grafana Cloud. Same series as the local endpoint, a second copy in a place
+// that survives the laptop closing.
+//
+// This block is the only difference between this file and config.alloy, and it
+// is why the credentials are read with sys.env(): a committed config file must
+// never be able to carry a token, and an unset variable has to fail loudly at
+// startup rather than silently write nowhere.
+prometheus.remote_write "cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_ID")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+
+  external_labels = {
+    source = "benchmark-run",
+  }
+}

@@ -73,6 +73,79 @@ writes independently, so a failure in one does not discard the others.
 To smoke-test before the real run, shrink `.env`:
 `JOBS=2 INSTANCES_PER_JOB=5 WINDOW_MINUTES=15`.
 
+## Watching a run
+
+`results/*.json` answers "which database was faster". It does not answer "what
+did that run cost the machine", because a phase records only its own average.
+A container that peaked at 2 GB and never said so looks identical to one that
+sat at 100 MB the whole time.
+
+```sh
+make monitor       # Grafana on http://localhost:3000  (admin/admin)
+make monitor-check # confirm every scrape target is actually delivering
+```
+
+Start it before the run, not after. `make bench` recreates the targets, and
+the window you care about is ingest and query, not the idle state.
+
+Five sources feed the dashboard:
+
+| Source | Gives you |
+| --- | --- |
+| cAdvisor | CPU and memory per container, including both targets |
+| `prometheus.exporter.unix` | host CPU, memory, filesystem, disk, network |
+| Prometheus under test | head series, samples appended, WAL fsync, blocks loaded |
+| `postgres-exporter` | database size, backends, `pg_stat_statements` |
+| `results/*.json` | the latency and footprint numbers, already measured |
+
+The Prometheus under test and the monitoring Prometheus are separate on purpose,
+with separate volumes. The measured TSDB is the artifact at 4.67 B/sample
+against Postgres at 279.76; one scraped target landing in it would move that
+headline. `make monitor-check` asserts it is still clean.
+
+### Container CPU is not trustworthy under Colima
+
+`make monitor-check` passes and the container CPU panel still shows nonsense:
+cAdvisor reported 8,000–10,000% for PostgreSQL while `docker stats` reported
+100%, on a 4-core VM. Container **memory** from the same source is accurate to
+within a MiB. Host CPU from `node_cpu_seconds_total` is accurate.
+
+So under Colima, read memory and host CPU off the dashboard, and take
+per-target CPU from `results/resource_*.json`, which samples `docker stats`
+directly and is what the numbers in the blog come from. On a plain Linux
+runner cAdvisor's CPU accounting is fine — this is a cgroup accounting problem
+in the Colima VM, not in the collection setup.
+
+### Keeping results off your laptop
+
+`results/` is a git commit away, which is enough to compare runs, but it is not
+a dashboard. Grafana Cloud gives the same panels a history that survives the
+machine, the way k6 Cloud keeps results server-side:
+
+```sh
+cp monitoring/.env.monitoring.example monitoring/.env.monitoring
+$EDITOR monitoring/.env.monitoring     # URL, instance ID, access policy token
+make monitor-cloud
+```
+
+Alloy then pushes to the local stack and Grafana Cloud at once. The token is
+read with `sys.env()` and never appears in a committed file;
+`monitoring/.env.monitoring` is gitignored.
+
+`monitoring/alloy/config.cloud.alloy` is generated from `config.alloy`, because
+Alloy has no conditionals and the two would otherwise be hand-maintained copies
+that drift. After editing the local config:
+
+```sh
+python3 monitoring/sync_cloud_config.py --write
+```
+
+`make monitor-check` fails if you forget. Both configs are validated with
+`docker run --rm -v "$PWD/monitoring/alloy:/etc/alloy:ro" grafana/alloy:latest
+validate /etc/alloy/config.alloy` — but note that `validate` does not catch a
+`labeldrop` rule that also sets `source_labels`, which fails only at runtime as
+`failed to evaluate config`. Check the Alloy log after changing the config.
+
 ## The recorded run in `results/`
 
 `results/` is a **real run, kept in the repo so the numbers in the write-up can
@@ -134,6 +207,13 @@ generator/
   generate.py         drives the load into both targets
 postgres/init/        two schemas: labels-as-jsonb, and identity+BRIN
 prometheus/           server config
+monitoring/
+  alloy/config.alloy        scrapes, relabel rules, local remote_write
+  alloy/config.cloud.alloy  generated: the above plus a Grafana Cloud endpoint
+  sync_cloud_config.py      regenerates it, or fails on drift
+  check.py                  make monitor-check
+  grafana/                  datasource and dashboard, provisioned from disk
+  prometheus/               config for the monitoring Prometheus
 bench/
   queries.py          the five query shapes, PromQL and SQL side by side
   bench.py            latency loop and percentiles
@@ -194,4 +274,10 @@ test the two structural findings in the write-up:
 | `footprint` reports 0 bytes | The containers are down, or `du` failed; check `results/footprint.json` for `null`. |
 | `build` fails on pip | No network. The image build needs PyPI. |
 | Ports already bound | Change `PROMETHEUS_PORT` / `POSTGRES_PORT` in `.env`. |
+| Grafana dashboard is empty | Run `make monitor-check`. An empty `container` label means cAdvisor attribution is broken again; an empty `pg_*` means the exporter lost its DNS entry after Postgres was recreated. |
+| Alloy restart-loops on `expected ], got EOF` | A parse error anywhere in the file reports at EOF. Look for a missing closing quote, not a missing bracket: the error line is the end of the file, not the mistake. |
+| Alloy: `remote write receiver needs to be enabled` | `monitoring-prometheus` is missing `--web.enable-remote-write-receiver`. |
+| Alloy: `failed to evaluate config` | A rule Alloy accepted at validate time is invalid at runtime. `labeldrop` takes only `regex`, never `source_labels`. |
+| Container CPU shows thousands of percent | cAdvisor CPU accounting under Colima. Use host CPU and `results/resource_*.json`. |
+| `postgres-exporter` logs `no such host` | Postgres is not on the compose network. It failed to attach because its host port was taken; point `POSTGRES_PORT` at a free port. |
 | Prometheus restart-loops: `open /etc/prometheus/prometheus.yml: no such file or directory` | The config bind mount resolved to nothing. Colima and Docker Desktop share only your home directory into the VM, so a checkout under `/tmp` mounts an empty directory. Keep the repo under `/Users` or `~`. |

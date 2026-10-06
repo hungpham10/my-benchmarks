@@ -1,0 +1,16 @@
+# Datasource for the provisioned dashboards.
+#
+# Points at the MONITORING Prometheus, never at the one under test. A dashboard
+# panel silently reading the wrong TSDB is the kind of mistake that makes a
+# benchmark untrustworthy.
+apiVersion: 1
+datasources:
+  - name: Monitoring
+    type: prometheus
+    uid: bench-monitoring
+    access: proxy
+    url: http://monitoring-prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 10s

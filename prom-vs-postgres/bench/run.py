@@ -118,6 +118,14 @@ def _parse_mem(text):
     return None
 
 
+# Exact container names of the systems under test. Matched exactly, never by
+# substring: the optional monitoring stack runs a container called
+# `monitoring-prometheus`, and a substring match would silently report its CPU
+# as Prometheus-under-test's. That would corrupt the headline resource numbers
+# without failing anything.
+TARGET_CONTAINERS = {"bench-prometheus": "prometheus", "bench-postgres": "postgres"}
+
+
 def sample_stats():
     """Instantaneous CPU% and memory for the two systems under test."""
     result = docker(["stats", "--no-stream", "--format",
@@ -134,7 +142,7 @@ def sample_stats():
             cpu = float(cpu_pct.rstrip("%"))
         except ValueError:
             continue
-        key = "prometheus" if "prometheus" in name else "postgres" if "postgres" in name else None
+        key = TARGET_CONTAINERS.get(name)
         if key:
             stats[key] = {"cpu_pct": cpu, "mem_bytes": _parse_mem(mem)}
     return stats

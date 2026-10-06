@@ -128,6 +128,137 @@ services:
       postgres:
         condition: service_healthy
 
+  # --- Monitoring ---------------------------------------------------------
+  #
+  # Opt-in via `--profile monitoring`, and deliberately NOT part of a measured
+  # run unless asked for. It exists so a run can be judged on two axes: which
+  # database is faster (results/) and what doing that cost the machine (this).
+  #
+  # The hard rule: monitoring never writes into the TSDB of the Prometheus under
+  # test. That TSDB is the thing being measured at 4.67 B/sample against
+  # Postgres at 279.76; one scraped target added to it would move the headline
+  # number. So Alloy remote-writes to a separate Prometheus with its own volume.
+
+  # Per-container CPU and memory for the systems under test.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: bench-cadvisor
+    profiles: ["monitoring"]
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      - --store_container_labels=true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    restart: unless-stopped
+
+  # Metrics for the systems under test, plus the host itself.
+  alloy:
+    image: grafana/alloy:latest
+    container_name: bench-alloy
+    profiles: ["monitoring"]
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/${ALLOY_CONFIG:-config.alloy}
+    volumes:
+      - ./monitoring/alloy:/etc/alloy:ro
+      # Root and /sys so prometheus.exporter.unix can read host CPU, memory and
+      # disk. The docker socket is deliberately absent: cAdvisor reports on every
+      # container already, so Alloy has no reason to talk to the Docker API.
+      - /:/rootfs:ro
+      - /sys:/sys:ro
+      - alloy-data:/var/lib/alloy/data
+    # Grafana Cloud credentials, when monitoring/.env.monitoring exists. Alloy
+    # reads them with sys.env(); config.alloy never mentions them, so a missing
+    # file is the normal case and not an error.
+    env_file:
+      - path: ./monitoring/.env.monitoring
+        required: false
+    depends_on:
+      monitoring-prometheus:
+        condition: service_healthy
+      cadvisor:
+        condition: service_started
+    ports:
+      - "${ALLOY_PORT:-12345}:12345"
+    restart: unless-stopped
+
+  # Storage for the operational metrics. Separate from the Prometheus under
+  # test, on purpose.
+  monitoring-prometheus:
+    image: prom/prometheus:latest
+    container_name: bench-monitoring-prometheus
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      # Alloy remote_writes here. Prometheus refuses remote write unless this is
+      # set, and the failure is a 404 that looks like a bad URL rather than a
+      # missing flag.
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - mon-prom-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Postgres operational metrics. Needs pg_stat_statements, which the target
+  # Postgres already loads via shared_preload_libraries.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: bench-postgres-exporter
+    profiles: ["monitoring"]
+    command:
+      - --collector.stat_statements
+      - --collector.stat_activity
+      - --collector.stat_database
+      - --collector.stat_wal_receiver
+    environment:
+      DATA_SOURCE_URI: "postgres:5432/bench?sslmode=disable"
+      DATA_SOURCE_USER: bench
+      DATA_SOURCE_PASS: bench
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Dashboards, provisioned from disk.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: bench-grafana
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      monitoring-prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   prom-data:
   pg-data:
+  alloy-data:
+  mon-prom-data:
+  grafana-data:
