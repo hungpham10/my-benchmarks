@@ -146,6 +146,66 @@ validate /etc/alloy/config.alloy` — but note that `validate` does not catch a
 `labeldrop` rule that also sets `source_labels`, which fails only at runtime as
 `failed to evaluate config`. Check the Alloy log after changing the config.
 
+### CI pushes too, on nightly and manual runs
+
+The `schedule` and `workflow_dispatch` jobs start the same stack and push the
+same series. `pull_request` runs do not: a PR run is a two-minute smoke test at
+ten series, which would bury the real runs, and a PR from a fork is not given
+repository secrets at all.
+
+Set three repository secrets once:
+
+```sh
+gh secret set GRAFANA_CLOUD_URL
+gh secret set GRAFANA_CLOUD_ID
+gh secret set GRAFANA_CLOUD_TOKEN
+```
+
+Without them the job skips the push, says so in the step log, and still runs
+the benchmark. The verification step runs `make monitor-check`, so a push that
+stops being accepted fails the job instead of leaving the benchmark to produce
+perfect results whose operational half nobody can see.
+
+CI passes `--no-deps` when starting the stack. `postgres-exporter` depends on
+postgres, so without it the monitoring stack would be what brings the system
+under test up, minutes before `make bench` would have — changing the state the
+benchmark starts from. The exporter retries DNS on its own and connects
+whenever postgres appears.
+
+### Telling runs apart
+
+Every sample carries `run_id` and `commit`, stamped by a relabel rule:
+
+```
+run_id   gh-<run number>.<attempt>   in CI
+         20261006T140233Z            locally, a UTC timestamp
+commit   the short SHA
+```
+
+Without them the history is unusable. cAdvisor's series have constant labels
+(`container="bench-postgres"`, `instance="cadvisor:8080"`), so every run writes
+to the *same* series and a month of nightly runs is one flat line with no way
+to tell which commit produced a spike. The host exporter goes the other way: its
+instance is the Alloy container ID, which changes every run, so each one leaves
+behind ~70 series that only expire with retention.
+
+In Grafana Cloud, pick runs from the `run_id` variable:
+
+```promql
+node_memory_MemAvailable_bytes{run_id=~"$run_id"}
+```
+
+To see all runs together instead, match on nothing:
+
+```promql
+node_memory_MemAvailable_bytes{run_id=""}
+```
+
+`make monitor-check` reports the runs currently in the TSDB, and fails if
+`BENCH_RUN_ID` is set but no series carries it. That case is otherwise
+invisible: Alloy accepts a rule that has no effect, evaluates it without error,
+and simply adds no label, which looks identical to a scrape that never started.
+
 ## The recorded run in `results/`
 
 `results/` is a **real run, kept in the repo so the numbers in the write-up can
@@ -279,6 +339,8 @@ test the two structural findings in the write-up:
 | Alloy restart-loops on `expected ], got EOF` | A parse error anywhere in the file reports at EOF. Look for a missing closing quote, not a missing bracket: the error line is the end of the file, not the mistake. |
 | Alloy: `remote write receiver needs to be enabled` | `monitoring-prometheus` is missing `--web.enable-remote-write-receiver`. |
 | Alloy: `failed to evaluate config` | A rule Alloy accepted at validate time is invalid at runtime. `labeldrop` takes only `regex`, never `source_labels`. |
+| Grafana Cloud has no new series | Check `gh secret list`. With no secrets the job skips the push and says so. Otherwise look for `samples_failed_total` in `docker logs bench-alloy`. |
+| `monitor-check` says `MISS ... run_id` | Alloy is running an older config or was not restarted after the relabel rules were added. |
 | Container CPU shows thousands of percent | cAdvisor CPU accounting under Colima. Use host CPU and `results/resource_*.json`. |
 | `postgres-exporter` logs `no such host` | Postgres is not on the compose network. It failed to attach because its host port was taken; point `POSTGRES_PORT` at a free port. |
 | Prometheus restart-loops: `open /etc/prometheus/prometheus.yml: no such file or directory` | The config bind mount resolved to nothing. Colima and Docker Desktop share only your home directory into the VM, so a checkout under `/tmp` mounts an empty directory. Keep the repo under `/Users` or `~`. |

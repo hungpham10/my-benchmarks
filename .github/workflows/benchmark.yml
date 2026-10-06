@@ -66,6 +66,18 @@ jobs:
       contents: write
       pull-requests: write
 
+    env:
+      # Identity of this run, stamped onto every monitoring sample by a relabel
+      # rule in the Alloy config. cAdvisor's series have constant labels, so
+      # without these every run would land on the same series and the history
+      # in Grafana Cloud would be one flat line with no run boundaries.
+      #
+      # run_id is the Actions run number, not a timestamp: it is the one a
+      # reader can paste into the run URL, and it is stable if the job is
+      # retried (run_attempt disambiguates that).
+      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}
+      BENCH_COMMIT: ${{ github.sha }}
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -102,8 +114,51 @@ jobs:
             echo "full"
           fi
 
+      # Operational metrics for the run itself, pushed to Grafana Cloud so the
+      # history outlives the runner. Started before the benchmark, because the
+      # window worth capturing is ingest and query, not the idle state.
+      #
+      # Skipped on pull_request for two reasons. A PR run is a two-minute smoke
+      # test at 10 series, which would bury the real runs in the stack. And a
+      # pull request from a fork is not given repository secrets at all, so
+      # there would be nothing to push with. `monitoring.enabled` records which
+      # it was, so a missing Grafana series is distinguishable from a
+      # deliberately skipped run.
+      # Decides whether to push at all, and materialises the credentials that
+      # compose will hand to Alloy.
+      - name: Prepare Grafana Cloud credentials
+        id: monitoring
+        if: github.event_name != 'pull_request'
+        env:
+          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
+          GRAFANA_CLOUD_ID: ${{ secrets.GRAFANA_CLOUD_ID }}
+          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GRAFANA_CLOUD_URL}" ] || [ -z "${GRAFANA_CLOUD_TOKEN}" ]; then
+            echo "Grafana Cloud secrets are not set; running without the cloud push."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Written to a file because that is how compose passes them to Alloy.
+          # The file is gitignored, so it cannot reach the results PR. Written
+          # with a restrictive mode: it holds a credential for the lifetime of
+          # the job.
+          umask 077
+          printf 'GRAFANA_CLOUD_URL=%s\nGRAFANA_CLOUD_ID=%s\nGRAFANA_CLOUD_TOKEN=%s\n' \
+            "$GRAFANA_CLOUD_URL" "$GRAFANA_CLOUD_ID" "$GRAFANA_CLOUD_TOKEN" \
+            > monitoring/.env.monitoring
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Build the bench image
         run: make build
+
+      # After the build, immediately before the run: the stack is up a few
+      # seconds before the targets rather than minutes, and --no-deps keeps the
+      # monitoring stack from being what starts postgres.
+      - name: Start monitoring
+        if: steps.monitoring.outputs.enabled == 'true'
+        run: make monitor-cloud MONITOR_DEPS=--no-deps
 
       - name: Run the benchmark
         # Start from an empty results/, not just a missing dataset.json. Every
@@ -119,6 +174,17 @@ jobs:
           rm -rf results
           mkdir -p results
           make bench
+
+      # Fails the job if nothing is arriving. A remote_write endpoint that stops
+      # accepting writes fails silently otherwise: Alloy queues to disk and the
+      # benchmark carries on producing perfect results that nobody can see the
+      # operational half of.
+      - name: Verify monitoring is delivering
+        if: always() && steps.monitoring.outputs.enabled == 'true'
+        run: |
+          python3 monitoring/check.py
+          echo "  Grafana Cloud: bench $BENCH_RUN_ID at commit $BENCH_COMMIT" \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Tear down
         # Always, even on failure. `make bench` does not stop the stack, and a
