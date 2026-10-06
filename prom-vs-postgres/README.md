@@ -1,8 +1,8 @@
 # Prometheus vs PostgreSQL for metrics: measurement harness
 
-One benchmark in [my-benchmarks](https://github.com/hungpham10/my-benchmarks),
-a collection of measurement harnesses. It backs a blog post comparing the two
-as metric storage; the write-up is `blog/post.md`.
+One benchmark in [my-benchmarks](https://github.com/hungpham10/my-benchmarks), a collection of measurement
+harnesses. Written to back a blog post comparing the two as metric
+storage; see `blog/post.md`.
 
 Loads one deterministic 3.6M-sample dataset (20k series x 45 min @ 15s) into
 Prometheus and into two PostgreSQL schemas, then measures three things:
@@ -10,29 +10,7 @@ Prometheus and into two PostgreSQL schemas, then measures three things:
 Everything goes through the real write and query paths — nothing is pre-built
 with `promtool tsdb create-blocks-from`.
 
-`results/report.md` is the output, and it is committed, so every number below
-can be checked without running anything.
-
-## Result of the recorded run
-
-Prometheus 3.15.0 vs PostgreSQL 18.6, 20k series x 180 samples = 3.6M samples,
-both systems capped at 1.5 CPU / 4 GB. Parity passed: identical count and
-identical sum on all three targets.
-
-| | Prometheus | PostgreSQL |
-| --- | --- | --- |
-| Bytes per sample | **4.67 B** | 279.72 B (**59.9x**) |
-| Ingest wall time | **14.4 s** | 40.3 s |
-| Ingest peak memory | **217 MiB** | 780 MiB |
-| Query peak memory | **237 MiB** | 1.2 GiB |
-| Query CPU (avg) | **1.6%** | 104.4% |
-
-Prometheus wins 9 of 11 dimensions. PostgreSQL wins per-series percentiles and
-single-series short reads. Read [Caveats](#things-that-will-bite-you) before
-quoting any of it — in particular, **nothing was compacted**, so the disk figure
-is the head and not settled steady state.
-
-The write-up these numbers came from is `blog/post.md`.
+`results/report.md` is the output.
 
 ## What it measures, and why each part exists
 
@@ -99,23 +77,24 @@ To smoke-test before the real run, shrink `.env`:
 
 `results/` is a **real run, kept in the repo so the numbers in the write-up can
 be checked against the raw JSON without re-running anything.** It was produced
-by Prometheus 3.15.0 and PostgreSQL 18.6, at the full `.env` scale.
+on a GitHub Actions runner (4 CPU / 16 GB) against Prometheus 3.15.0 and
+PostgreSQL 18.6, at the full `.env` scale. The exact image digests are in
+`results/environment.json`.
 
-One caveat worth stating plainly: the recorded latency run used **100
-iterations with 10 warmup**, overridden on the command line to keep the run
-inside a sane wall-clock budget. `.env` and `results/environment.json` still
-say 300/20, so they do *not* describe the run that produced `query.json`.
-`results/query.json` is authoritative and carries its own `iterations` and
-`warmup`, and `report.md` renders the numbers from there.
+The query phase used **300 iterations per cell with 20 warmup**, which is what
+`.env` asks for. That phase alone takes about two hours, which is most of the
+run. `results/query.json` carries the authoritative `iterations` and `warmup`
+and `report.md` renders from there.
 
 What the recorded run shows:
 
 | | Prometheus | PostgreSQL |
 | --- | --- | --- |
-| Bytes per sample | 4.67 B | 279.72 B (59.9x) |
-| Ingest wall time | 14.4 s | 40.3 s |
-| Ingest peak memory | 217 MiB | 780 MiB |
-| Query peak memory | 237 MiB | 1.2 GiB |
+| Bytes per sample | 4.67 B | 279.76 B (59.9x) |
+| Ingest wall time | 16.1 s | 43.8 s |
+| Ingest peak memory | 286 MiB | 793 MiB |
+| Query peak memory | 293 MiB | 1.21 GiB |
+| Query CPU (avg) | 2.2% | 105.7% |
 
 Prometheus wins 9 of the 11 compared dimensions; PostgreSQL wins two query
 shapes (single-series percentile, single-series short window). Read
