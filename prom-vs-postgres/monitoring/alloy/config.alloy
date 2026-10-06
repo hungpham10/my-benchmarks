@@ -98,12 +98,48 @@ prometheus.scrape "postgres" {
   scrape_interval = "10s"
 }
 
-// Applied to every metric on its way to the remote-write endpoint. Two jobs:
-// make cAdvisor's series readable, then delete the parts nobody reads.
+// Applied to every metric on its way to the remote-write endpoint. Three jobs:
+// give every sample an identity, make cAdvisor's series readable, then delete
+// the parts nobody reads.
 //
 // Rules run in order and stop at the first match per metric.
 prometheus.relabel "trim" {
   forward_to = [prometheus.remote_write.monitoring.receiver]
+
+  // Identity. Without these, metrics from different benchmark runs are
+  // indistinguishable once they are in the same TSDB.
+  //
+  // On a laptop that hardly matters: one run at a time, and the run is whatever
+  // is on screen. It matters as soon as runs accumulate somewhere they outlive
+  // the run itself - Grafana Cloud, or a nightly CI job writing to one stack.
+  // Then cAdvisor's series have constant labels (`container="bench-postgres"`,
+  // `instance="cadvisor:8080"`), so every run lands on the *same* series and the
+  // history becomes one flat line with no way to attribute a spike to a commit.
+  // Meanwhile the host exporter's instance is the Alloy container ID, so each run
+  // adds ~70 series that outlive it and only expire with retention.
+  //
+  // Both come from the environment, so the same config serves a hand-run and a
+  // scheduled one. With the variables unset the replacement is empty, which
+  // removes the label rather than writing run_id="" onto every series in the
+  // stack.
+  //
+  // Sourced from "job", which prometheus.scrape injects on every series, so the
+  // regex always matches and the rule cannot quietly do nothing.
+  rule {
+    action        = "replace"
+    source_labels = ["job"]
+    regex         = "(.+)"
+    target_label  = "run_id"
+    replacement   = sys.env("BENCH_RUN_ID")
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["job"]
+    regex         = "(.+)"
+    target_label  = "commit"
+    replacement   = sys.env("BENCH_COMMIT")
+  }
 
   // cAdvisor calls the container name "name", which reads as something else
   // entirely in a query. Require the Compose service label alongside it so

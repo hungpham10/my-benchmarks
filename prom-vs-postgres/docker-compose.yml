@@ -181,6 +181,12 @@ services:
     env_file:
       - path: ./monitoring/.env.monitoring
         required: false
+    environment:
+      # Identity of the run, stamped onto every sample by a relabel rule. Empty
+      # by default, which removes the label rather than writing an empty one.
+      # The Makefile fills these in; CI fills them from the run number and SHA.
+      - BENCH_RUN_ID=${BENCH_RUN_ID:-}
+      - BENCH_COMMIT=${BENCH_COMMIT:-}
     depends_on:
       monitoring-prometheus:
         condition: service_healthy

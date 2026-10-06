@@ -5,6 +5,20 @@
 # goes wrong, the question is always which of ingest/footprint/query broke.
 
 PY      ?= python3
+# --no-deps when set. The monitoring stack must not be what starts the systems
+# under test: postgres-exporter depends on postgres, so without this flag
+# `make monitor-cloud` would bring the target up early, and the benchmark would
+# then start against a database that has been sitting there for however long the
+# build step took. The exporter retries DNS on its own, so it connects whenever
+# postgres does appear.
+MONITOR_DEPS ?=
+
+# Identity of this run, stamped onto every monitoring sample. Defaults to a
+# timestamp so two hand-runs on one day are still separable; CI overrides both.
+BENCH_RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
+BENCH_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+export BENCH_RUN_ID
+export BENCH_COMMIT
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo docker-compose)
 RESULTS := results
 
@@ -53,8 +67,9 @@ bench: ## everything, in order
 
 .PHONY: monitor
 monitor: ## start the monitoring stack on top of the targets (Grafana on :3000)
-	$(COMPOSE) --profile monitoring up -d cadvisor monitoring-prometheus \
-	  postgres-exporter alloy grafana
+	BENCH_RUN_ID=$(BENCH_RUN_ID) BENCH_COMMIT=$(BENCH_COMMIT) \
+	$(COMPOSE) --profile monitoring up $(MONITOR_DEPS) -d cadvisor \
+	  monitoring-prometheus postgres-exporter alloy grafana
 	@echo
 	@echo "  Grafana      http://localhost:$${GRAFANA_PORT:-3000}  (admin/admin)"
 	@echo "  Alloy UI     http://localhost:$${ALLOY_PORT:-12345}"
@@ -67,8 +82,10 @@ monitor-cloud: ## same, plus a push to Grafana Cloud for a durable record
 	@test -f monitoring/.env.monitoring || { \
 	  echo "  copy monitoring/.env.monitoring.example to monitoring/.env.monitoring and fill it in"; \
 	  exit 1; }
-	ALLOY_CONFIG=config.cloud.alloy $(COMPOSE) --profile monitoring up -d \
-	  cadvisor monitoring-prometheus postgres-exporter alloy grafana
+	BENCH_RUN_ID=$(BENCH_RUN_ID) BENCH_COMMIT=$(BENCH_COMMIT) \
+	ALLOY_CONFIG=config.cloud.alloy $(COMPOSE) --profile monitoring \
+	  up $(MONITOR_DEPS) -d cadvisor monitoring-prometheus \
+	  postgres-exporter alloy grafana
 	@echo
 	@echo "  Grafana      http://localhost:$${GRAFANA_PORT:-3000}  (admin/admin)"
 	@echo "  Alloy UI     http://localhost:$${ALLOY_PORT:-12345}"

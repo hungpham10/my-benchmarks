@@ -6,12 +6,15 @@ Three things get checked, cheapest first:
   1. config.cloud.alloy still matches config.alloy (drift check)
   2. every scrape target is delivering series
   3. the Prometheus under test has not been contaminated by monitoring
+  4. the current run is stamped onto the series
 
-(3) is the one that matters most. A mistake in the remote_write wiring puts
+(3) is the one that matters most. (4) exists because a relabel rule that has no
+effect is indistinguishable from a scrape that is not running: Alloy validates it,
+evaluates it without error, and adds no label. Both look like "no data". A mistake in the remote_write wiring puts
 operational metrics into the TSDB being measured, and every footprint number in
 results/ becomes wrong without anything failing.
 """
-import json, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from sync_cloud_config import BASE, CLOUD  # noqa: E402
@@ -30,12 +33,16 @@ QUERIES = [
 ]
 
 
-def query(q):
+def query_raw(q):
     out = subprocess.run(
         ["docker", "exec", "bench-monitoring-prometheus",
          "wget", "-qO-", "http://localhost:9090/api/v1/query", "--post-data=" + f"query={q}"],
         capture_output=True, text=True, check=True).stdout
-    result = json.loads(out)["data"]["result"]
+    return json.loads(out)["data"]["result"]
+
+
+def query(q):
+    result = query_raw(q)
     return int(result[0]["value"][1]) if result else 0
 
 
@@ -62,6 +69,13 @@ def under_test_is_clean() -> bool:
         return False
 
 
+def runs() -> list[tuple[str, str, int]]:
+    """Every (run_id, commit, series) currently in the TSDB."""
+    result = query_raw("count by (run_id, commit) (container_cpu_usage_seconds_total)")
+    return [(r["metric"].get("run_id", ""), r["metric"].get("commit", ""),
+             int(float(r["value"][1]))) for r in result]
+
+
 def main():
     failed = []
 
@@ -77,6 +91,25 @@ def main():
     else:
         print("  LEAK   monitoring series found in the Prometheus under test")
         failed.append("monitoring series in the measured TSDB")
+
+    # A relabel rule that has no effect is indistinguishable from a scrape that
+    # is not running: Alloy validates it, evaluates it without error, and adds
+    # no label. So assert the run we asked for is actually there.
+    expected = os.environ.get("BENCH_RUN_ID", "")
+    present = runs()
+    mine = [r for r in present if r[0] == expected] if expected else present
+    if expected and not mine:
+        print(f"  MISS   BENCH_RUN_ID={expected} is set but no series carries it.")
+        print("         Alloy is running an older config, or was not restarted.")
+        failed.append("run_id missing")
+    elif mine:
+        run_id, commit, n = max(mine, key=lambda r: r[2])
+        print(f"  ok     run_id={run_id} commit={commit or '-'} ({n} series)")
+    else:
+        print("  --     no run_id on any series (BENCH_RUN_ID unset; expected locally)")
+    if len(present) > 1:
+        print(f"  note   {len(present)} runs in this TSDB: "
+              + ", ".join(sorted(r[0] for r in present)))
 
     print(f"{'signal':<26} {'series':>8}")
     print("-" * 36)
