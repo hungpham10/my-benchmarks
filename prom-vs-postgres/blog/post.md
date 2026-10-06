@@ -31,7 +31,7 @@ I was wrong about both.
 
 One deterministic dataset, loaded into Prometheus and into two Postgres schemas.
 
-- Prometheus 3.15.0 and PostgreSQL 18.6
+- Prometheus 3.15.0 and PostgreSQL 18.6, digests in `results/environment.json`
 - 1.5 CPU and 4 GB each. Identical, on purpose
 - 20,000 series, 180 samples each, 3.6M samples, 45 minutes at 15s
 - Targets loaded one at a time, never together, so they never compete
@@ -67,7 +67,7 @@ WAL excluded, since WAL is temporary and not a property of the stored data.
 | Target | On disk | Per sample |
 | --- | --- | --- |
 | Prometheus | 16.0 MiB | **4.67 B** |
-| PostgreSQL | 960.3 MiB | **279.72 B** |
+| PostgreSQL | 960.3 MiB | **279.76 B** |
 
 **59.9x.** I guessed 10x.
 
@@ -86,64 +86,65 @@ the write pattern, not a broken index.
 
 | Target | Wall time | CPU (avg / peak) | Peak memory |
 | --- | --- | --- | --- |
-| Prometheus | 14.4 s | 9.0% / 16.0% | 217.3 MiB |
-| PostgreSQL | 40.3 s | 62.9% / 83.7% | 780.0 MiB |
+| Prometheus | 16.1 s | 9.9% / 16.8% | 286 MiB |
+| PostgreSQL | 43.8 s | 61.9% / 81.5% | 793 MiB |
 
 ### Latency
 
-Warm, serial, one connection. 100 iterations per cell, Prometheus stepped at
-300s so both return a comparable number of rows.
+Warm, serial, one connection. 300 iterations per cell after 20 warmup runs,
+Prometheus stepped at 300s so both return a comparable number of rows.
 
 | Shape | Prometheus | PG jsonb | PG norm+BRIN |
 | --- | --- | --- | --- |
-| q1 `sum(rate(http_requests_total[5m]))` | **132 / 160 ms** | 16095 / 16179 ms | 1246 / 1262 ms |
-| q2 `sum by (job) (queue_depth)` | **91 / 117 ms** | 1103 / 1139 ms | 573 / 606 ms |
-| q3 `quantile_over_time(0.9, queue_depth{job="job-00"}[1h])` | 42 / 86 ms | 243 / 247 ms | **35 / 36 ms** |
-| q4 `sum(queue_depth{job="job-00"})` | **5.0 / 8.1 ms** | 217 / 220 ms | 17.0 / 17.7 ms |
-| q5 single series, 15 min | 0.75 / 0.86 ms | 62.8 / 65.3 ms | **0.49 / 0.53 ms** |
+| q1 `sum(rate(http_requests_total[5m]))` | **136 / 165 ms** | 16169 / 16268 ms | 1524 / 1593 ms |
+| q2 `sum by (job) (queue_depth)` | **97 / 117 ms** | 1121 / 1144 ms | 799 / 885 ms |
+| q3 `quantile_over_time(0.9, queue_depth{job="job-00"}[1h])` | 39 / 73 ms | 198 / 205 ms | **35 / 36 ms** |
+| q4 `sum(queue_depth{job="job-00"})` | **5.2 / 7.7 ms** | 174 / 180 ms | 16.2 / 17.4 ms |
+| q5 single series, 15 min | 1.0 / 1.0 ms | 44.7 / 46.0 ms | **0.5 / 0.8 ms** |
 
-p50 / p95.
+p50 / p95, 300 iterations per cell.
 
-- **q1, counter rate.** About 100x on the normalised schema, 120x on jsonb.
-- **q2, grouped sum.** The closest to a fair fight. Prometheus still wins 10x.
-- **q3, percentile.** Postgres wins.
-- **q4, one job, whole window.** Prometheus wins 43x. The label index working as
+- **q1, counter rate.** About 11x on the normalised schema, 118x on jsonb.
+- **q2, grouped sum.** The closest to a fair fight. Prometheus still wins 8x.
+- **q3, percentile.** Postgres wins, but only by 1.1x. The two are nearly tied
+  here, which is worth noticing.
+- **q4, one job, whole window.** Prometheus wins 3x. The label index working as
   designed.
-- **q5, one series, 15 min.** Postgres wins.
+- **q5, one series, 15 min.** Postgres wins 2x.
 
-Also worth noting: normalising the schema beat jsonb on all five shapes, 13x on
-q1 alone. If you have to use Postgres, normalise.
+Also worth noting: normalising the schema beat jsonb on all five shapes, 11x on
+q1 and 90x on q5. If you have to use Postgres, normalise.
 
 ### Resources during the query phase
 
 | Target | CPU (avg / peak) | Peak memory |
 | --- | --- | --- |
-| Prometheus | 1.6% / 101.7% | 236.8 MiB |
-| PostgreSQL | 104.4% / 156.4% | **1.2 GiB** |
+| Prometheus | 2.2% / 103.5% | 293 MiB |
+| PostgreSQL | 105.7% / 156.7% | **1.21 GiB** |
 
-Prometheus averaged 1.6% of one core across the whole suite. Postgres was
+Prometheus averaged 2.2% of one core across the whole suite. Postgres was
 saturated the entire time.
 
 ## What surprised me
 
 **The gap was two orders of magnitude, not one.** I expected 3x on queries. The
-counter rate query took 16 seconds on jsonb and 132 ms on Prometheus. That is not
+counter rate query took 16 seconds on jsonb and 136 ms on Prometheus. That is not
 "Prometheus is better engineered". That is a different category of operation.
 
 **The jsonb schema was not merely slower, it was unusable.** 16 seconds for a
-query that Prometheus answers in 160ms. My expectation was that jsonb would be
-maybe 1.5x behind the normalised schema. It was 13x behind on q1. Normalising
+query that Prometheus answers in 165ms. My expectation was that jsonb would be
+maybe 1.5x behind the normalised schema. It was 11x behind on q1. Normalising
 turned out to matter far more than any Postgres tuning knob.
 
-**Postgres used 5x the memory and never stopped working.** 1.2 GiB peak and
-pinned at 104% CPU for the entire 36-minute suite, while Prometheus idled at
-1.6%. I had not expected the *resource* difference to be this lopsided. It
-matters more than latency in practice, because it decides how many series you
-can afford to keep.
+**Postgres used 4x the memory and never stopped working.** 1.21 GiB peak and
+pinned at 105% CPU for the entire suite, while Prometheus idled at 2.2%. I had
+not expected the *resource* difference to be this lopsided. It matters more than
+latency in practice, because it decides how many series you can afford to keep.
 
 **The two shapes where Postgres won were completely predictable.** Percentiles
 and single-series lookups. Once I read the query engine I could point at the
-exact reason for both, and it was not a close call in either direction.
+exact reason for both. Though q3 turned out closer than I expected: 35 ms
+against 39 ms, not the routeless win I had pictured.
 
 At this point I had numbers I did not understand. So I read the code.
 
@@ -298,8 +299,9 @@ Read these before quoting any number above.
   autovacuum) are a bigger share of its total than they would be in production.
 - **Warm, serial, one connection.** No parallelism on either side. Postgres
   parallelises scans across workers; this does not test that.
-- **P99 over 100 iterations is basically the maximum.** Do not quote it as tail
-  latency.
+- **P99 is still not a tail latency.** At 300 iterations p99 is roughly the
+  third-worst sample. Treat it as "one of the slow runs", not as a percentile.
+  These are warm, serial, single-connection numbers throughout.
 - **Write amplification and delete churn are argued from source, not measured.**
   I did not run long enough to compact anything.
 - **Images are `:latest`.** Keep the digests from `results/environment.json` or
@@ -310,7 +312,7 @@ Read these before quoting any number above.
 Postgres is not a bad metrics store. It is a good general store paying for
 generality in a currency that matters here: disk.
 
-4.67 bytes per sample versus 279.72 is not a tuning gap. It comes down to one
+4.67 bytes per sample versus 279.76 is not a tuning gap. It comes down to one
 thing. Prometheus can assume samples arrive in time order and spend one bit on a
 regular interval. Postgres cannot assume that, so it pays.
 
@@ -340,5 +342,7 @@ make bench
 
 Harness, raw JSON and CI: <https://github.com/hungpham10/my-benchmarks/prom-vs-postgres>
 
-The recorded run used 100 iterations per cell rather than the 300 in `.env`, to
-keep it under a sane wall-clock budget. `results/query.json` has the real count.
+The recorded run was made on a GitHub Actions runner, not a laptop, and is
+reproducible from the workflow: <kbd>Actions</kbd> → *benchmark* → *Run
+workflow* → `scale=full`. It takes about two hours, almost all of it in the
+query phase.
