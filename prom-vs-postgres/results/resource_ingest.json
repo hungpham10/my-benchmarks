@@ -1,28 +1,28 @@
 {
  "prometheus": {
-  "seconds": 14.39,
+  "seconds": 16.14,
   "prometheus": {
-   "cpu_pct_avg": 9.0,
-   "cpu_pct_peak": 16.0,
-   "mem_bytes_peak": 227855564
+   "cpu_pct_avg": 9.9,
+   "cpu_pct_peak": 15.4,
+   "mem_bytes_peak": 299787878
   },
   "postgres": {
-   "cpu_pct_avg": 1.0,
-   "cpu_pct_peak": 3.9,
-   "mem_bytes_peak": 62631444
+   "cpu_pct_avg": 26.7,
+   "cpu_pct_peak": 106.7,
+   "mem_bytes_peak": 63774392
   }
  },
  "postgres": {
-  "seconds": 40.29,
+  "seconds": 43.79,
   "prometheus": {
-   "cpu_pct_avg": 0.5,
-   "cpu_pct_peak": 1.4,
-   "mem_bytes_peak": 263297433
+   "cpu_pct_avg": 0.8,
+   "cpu_pct_peak": 3.4,
+   "mem_bytes_peak": 300626739
   },
   "postgres": {
-   "cpu_pct_avg": 62.9,
-   "cpu_pct_peak": 83.7,
-   "mem_bytes_peak": 817889280
+   "cpu_pct_avg": 61.9,
+   "cpu_pct_peak": 93.4,
+   "mem_bytes_peak": 831101337
   }
  }
 }
