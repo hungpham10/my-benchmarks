@@ -31,6 +31,11 @@ There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
 `scale=smoke` finishes in about two minutes and checks that the harness still
 runs. `scale=full` takes roughly forty and regenerates `results/`.
 
+`prom-vs-postgres` also ships an optional monitoring stack: cAdvisor, a host
+exporter and both databases' own metrics feed a Grafana dashboard, so a run can
+be judged on what it cost the machine as well as how fast it was. See
+[Watching a run](prom-vs-postgres/README.md#watching-a-run).
+
 ## What every benchmark here has in common
 
 - **Equal resource envelopes.** Whatever is under test gets the same CPU and

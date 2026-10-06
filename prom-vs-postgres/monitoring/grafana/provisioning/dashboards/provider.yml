@@ -1,0 +1,12 @@
+# Dashboard provisioning. Files are read from the mounted dashboards directory,
+# so adding a panel means editing JSON, not clicking through the UI.
+apiVersion: 1
+providers:
+  - name: benchmark
+    orgId: 1
+    folder: benchmark
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

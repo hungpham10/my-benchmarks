@@ -21,7 +21,7 @@ up: ## start Prometheus and PostgreSQL, wait for both to be healthy
 
 .PHONY: down
 down: ## stop everything and delete the data volumes
-	$(COMPOSE) --profile ingest --profile bench down -v
+	$(COMPOSE) --profile ingest --profile bench --profile monitoring down -v
 
 .PHONY: build
 build: ## build the bench image (needs network for pip)
@@ -50,6 +50,36 @@ report: ## render $(RESULTS)/report.md
 .PHONY: bench
 bench: ## everything, in order
 	$(PY) bench/run.py all
+
+.PHONY: monitor
+monitor: ## start the monitoring stack on top of the targets (Grafana on :3000)
+	$(COMPOSE) --profile monitoring up -d cadvisor monitoring-prometheus \
+	  postgres-exporter alloy grafana
+	@echo
+	@echo "  Grafana      http://localhost:$${GRAFANA_PORT:-3000}  (admin/admin)"
+	@echo "  Alloy UI     http://localhost:$${ALLOY_PORT:-12345}"
+	@echo
+	@echo "  The monitoring Prometheus holds its own series and its own volume."
+	@echo "  results/footprint.json still measures the Prometheus under test only."
+
+.PHONY: monitor-cloud
+monitor-cloud: ## same, plus a push to Grafana Cloud for a durable record
+	@test -f monitoring/.env.monitoring || { \
+	  echo "  copy monitoring/.env.monitoring.example to monitoring/.env.monitoring and fill it in"; \
+	  exit 1; }
+	ALLOY_CONFIG=config.cloud.alloy $(COMPOSE) --profile monitoring up -d \
+	  cadvisor monitoring-prometheus postgres-exporter alloy grafana
+	@echo
+	@echo "  Grafana      http://localhost:$${GRAFANA_PORT:-3000}  (admin/admin)"
+	@echo "  Alloy UI     http://localhost:$${ALLOY_PORT:-12345}"
+	@echo
+	@echo "  Pushing to Grafana Cloud as well. Check it arrived:"
+	@echo "    docker logs bench-alloy 2>&1 | grep -i remote_write"
+	@echo "  Run make monitor-check to confirm both destinations are receiving."
+
+.PHONY: monitor-check
+monitor-check: ## verify the monitoring stack is collecting what the dashboard needs
+	$(PY) monitoring/check.py
 
 .PHONY: clean-results
 clean-results: ## delete measurements, keep the stack

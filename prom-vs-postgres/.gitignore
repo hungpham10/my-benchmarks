@@ -17,3 +17,6 @@ venv/
 
 # Rendered from blog/post.md by blog/publish_wordpress.py --dry-run.
 blog/post.html
+
+# Grafana Cloud credentials. The template next to it is committed; this copy is not.
+/monitoring/.env.monitoring
