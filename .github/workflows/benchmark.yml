@@ -1,18 +1,26 @@
 # Prometheus vs PostgreSQL metrics benchmark.
 #
-# Manual + nightly, deliberately NOT on push. The query phase alone is ~36
-# minutes at full scale, and every run competes for the same fixed runner
-# cores, so a per-push trigger would make the numbers depend on how many other
-# jobs happened to be queued.
+# Three ways in, deliberately different:
 #
-# Why not the free-tier 2 CPU / 7 GB runners: the envelope in .env gives each
-# target under test 1.5 CPU / 4 GB. Two targets plus a runner plus the OS need
-# 16 GB. On a 7 GB runner the runner itself becomes the bottleneck and the
-# "resource consumption" numbers would measure the runner.
+#   pull_request  smoke only. Validates that a change to the harness still runs,
+#                 in about two minutes. A full run would make every PR unusable.
+#   schedule      nightly full, to catch upstream drift in the `:latest` images.
+#   dispatch      manual, full by default, for a deliberate run.
+#
+# Both images under test are `:latest`, so these numbers describe whatever the
+# tag resolved to on the day. That is why the nightly run exists at all.
 
 name: benchmark
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/benchmark.yml'
+      - 'prom-vs-postgres/**'
+  schedule:
+    # 03:17 UTC. Off the hour so it does not queue behind everyone else's
+    # midnight jobs.
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       scale:
@@ -21,15 +29,12 @@ on:
         options: [smoke, full]
         default: full
       publish:
-        description: Commit results/ back to the default branch
+        description: Open a PR with the results
         type: boolean
         default: false
-  schedule:
-    # 03:17 UTC nightly. Off the hour so it does not queue behind everyone
-    # else's midnight jobs.
-    - cron: "17 3 * * *"
-  # No pull_request trigger: see above.
 
+# Declared explicitly rather than inherited. A missing scope fails at the API
+# call with a 403 that looks like a permissions bug in the workflow.
 permissions:
   contents: read
 
@@ -40,10 +45,10 @@ concurrency:
 
 jobs:
   bench:
-    # ~40 min full scale: build (~2) + up (~1) + ingest (~1) + footprint +
-    # query (~36) + parity (~1). 120 leaves room for a slow pull day.
-    timeout-minutes: 120
     runs-on: ubuntu-latest
+    # Full scale is build (~2) + up (~1) + ingest (~1) + footprint + query
+    # (~36) + parity (~1). 120 leaves room for a slow image pull day.
+    timeout-minutes: 120
 
     # Everything the benchmark needs lives in one subdirectory, but GitHub only
     # reads workflows from ./.github/workflows. So the workflow sits at the repo
@@ -52,46 +57,62 @@ jobs:
       run:
         working-directory: prom-vs-postgres
 
+    # Job level, because GitHub's step schema has no `permissions` key at all:
+    # putting it on a step makes the whole workflow fail to parse, with an
+    # HTTP 422 at dispatch time and no run logs to explain why. That is broader
+    # than the publish step needs, and it is accepted here because this job
+    # holds no secrets and its only write is results/.
+    permissions:
+      contents: write
+      pull-requests: write
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Report runner capacity
-        # The envelope is only meaningful if the machine can actually honour
-        # it. Fail loudly rather than silently producing numbers that measure
-        # the runner.
+        # The envelope is only meaningful if the machine can honour it. Fail
+        # loudly rather than silently measuring the runner instead of the
+        # systems under test.
         run: |
-          nproc
+          echo "cpus: $(nproc)"
           free -g | head -2
           df -h "$RUNNER_TEMP" | tail -1
 
       - name: Configure scale
+        # A pull request never runs full, whatever the inputs say.
         run: |
-          if [ "${{ inputs.scale }}" = "smoke" ]; then
-            {
-              echo 'JOBS=2'
-              echo 'INSTANCES_PER_JOB=5'
-              echo 'WINDOW_MINUTES=15'
-              echo 'QUERY_ITERATIONS=30'
-              echo 'QUERY_WARMUP=5'
-            } >> "$GITHUB_ENV"
-            echo "smoke scale selected"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'JOBS=2'          >> "$GITHUB_ENV"
+            echo 'INSTANCES_PER_JOB=5' >> "$GITHUB_ENV"
+            echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
+            echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
+            echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
+            echo "smoke (pull_request)"
+          elif [ "${{ inputs.scale }}" = "smoke" ]; then
+            echo 'JOBS=2'          >> "$GITHUB_ENV"
+            echo 'INSTANCES_PER_JOB=5' >> "$GITHUB_ENV"
+            echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
+            echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
+            echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
+            echo "smoke (dispatch)"
           else
-            echo "full scale selected"
+            echo "full"
           fi
 
       - name: Build the bench image
         run: make build
 
       - name: Run the benchmark
-        # Start from an empty results/, not just a missing dataset.json. The
-        # committed results/ is the record of the previous run, and every phase
-        # writes independently, so a run that dies after ingest would leave the
-        # previous query.json and report.md in place and the upload step would
-        # publish stale numbers as if they were fresh.
+        # Start from an empty results/, not just a missing dataset.json. Every
+        # phase writes independently, so a run that dies after ingest would
+        # leave the previous query.json and report.md in place and the upload
+        # step would publish stale numbers as if they were fresh.
         #
         # dataset.json in particular must not survive: later phases reuse its
-        # timestamp anchor, and a committed one is hours old by the time CI
+        # timestamp anchor, and a committed one is hours old by the time this
         # runs. Prometheus rejects samples older than MaxTime - chunkRange/2
         # (~1h at the default 2h chunk range).
         run: |
@@ -100,7 +121,7 @@ jobs:
           make bench
 
       - name: Tear down
-        # Always, even on failure: `make bench` does not stop the stack, and a
+        # Always, even on failure. `make bench` does not stop the stack, and a
         # failed job would otherwise leave containers running.
         if: always()
         run: make down || true
@@ -109,7 +130,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ inputs.scale || 'full' }}-${{ github.run_number }}
+          name: results-${{ github.run_number }}
           path: prom-vs-postgres/results/
           if-no-files-found: error
           retention-days: 90
@@ -118,20 +139,60 @@ jobs:
         if: always()
         run: |
           echo "### benchmark summary" >> "$GITHUB_STEP_SUMMARY"
-          [ -f results/report.md ] && cat results/report.md >> "$GITHUB_STEP_SUMMARY" \
-            || echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Commit results back
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
-        permissions:
-          contents: write
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add results/
-          if git diff --cached --quiet; then
-            echo "no change in results/"
-            exit 0
+          if [ -f results/report.md ]; then
+            cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
           fi
-          git commit -m "bench: results from run ${{ github.run_number }}"
-          git push
+
+      # Opens a PR rather than pushing to main. This is a public repository and
+      # results/ is the evidence behind a published post, so a run landing on
+      # main should be a diff somebody can read rather than a push.
+      - name: Open a PR with the results
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = `bench/run-${{ github.run_number }}`;
+            const cwd = process.env.GITHUB_WORKSPACE;
+            const { execSync } = require('child_process');
+
+            const run = (cmd) => execSync(cmd, { cwd, encoding: 'utf8' });
+
+            run(`git config user.name  "github-actions[bot]"`);
+            run(`git config user.email "41898282+github-actions[bot]@users.noreply.github.com"`);
+
+            const base = process.env.GITHUB_REF_NAME || 'main';
+            run(`git checkout -b ${branch}`);
+            run(`git add prom-vs-postgres/results`);
+
+            // Nothing changed: the recorded run reproduces exactly.
+            const staged = run(`git diff --cached --name-only`).trim();
+            if (!staged) {
+              core.info('results/ is byte-identical to main; nothing to open.');
+              return;
+            }
+
+            const scale = '${{ inputs.scale }}';
+            run(`git commit -m "bench: results from run ${{ github.run_number }} (${scale})"`);
+            run(`git push --force origin ${branch}`);
+
+            const body = [
+              `Automated results from run ${{ github.run_number }} (${scale} scale).`,
+              '',
+              `Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+              '',
+              'Image digests for this run are in `prom-vs-postgres/results/environment.json`.',
+              'If these numbers differ from the previous run, the cause is upstream image',
+              'drift: both systems under test are on `:latest`.',
+            ].join('\n');
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base: base,
+              head: branch,
+              title: `bench: results from run ${{ github.run_number }} (${scale})`,
+              body,
+            });
+            core.info(`Opened PR #${pr.number}: ${pr.html_url}`);

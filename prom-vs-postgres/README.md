@@ -1,8 +1,8 @@
 # Prometheus vs PostgreSQL for metrics: measurement harness
 
-One benchmark in [my-benchmarks](https://github.com/hungpham10/my-benchmarks), a collection of measurement
-harnesses. Written to back a blog post comparing the two as metric
-storage; see `blog/post.md`.
+One benchmark in [my-benchmarks](https://github.com/hungpham10/my-benchmarks),
+a collection of measurement harnesses. It backs a blog post comparing the two
+as metric storage; the write-up is `blog/post.md`.
 
 Loads one deterministic 3.6M-sample dataset (20k series x 45 min @ 15s) into
 Prometheus and into two PostgreSQL schemas, then measures three things:
@@ -10,7 +10,29 @@ Prometheus and into two PostgreSQL schemas, then measures three things:
 Everything goes through the real write and query paths — nothing is pre-built
 with `promtool tsdb create-blocks-from`.
 
-`results/report.md` is the output.
+`results/report.md` is the output, and it is committed, so every number below
+can be checked without running anything.
+
+## Result of the recorded run
+
+Prometheus 3.15.0 vs PostgreSQL 18.6, 20k series x 180 samples = 3.6M samples,
+both systems capped at 1.5 CPU / 4 GB. Parity passed: identical count and
+identical sum on all three targets.
+
+| | Prometheus | PostgreSQL |
+| --- | --- | --- |
+| Bytes per sample | **4.67 B** | 279.72 B (**59.9x**) |
+| Ingest wall time | **14.4 s** | 40.3 s |
+| Ingest peak memory | **217 MiB** | 780 MiB |
+| Query peak memory | **237 MiB** | 1.2 GiB |
+| Query CPU (avg) | **1.6%** | 104.4% |
+
+Prometheus wins 9 of 11 dimensions. PostgreSQL wins per-series percentiles and
+single-series short reads. Read [Caveats](#things-that-will-bite-you) before
+quoting any of it — in particular, **nothing was compacted**, so the disk figure
+is the head and not settled steady state.
+
+The write-up these numbers came from is `blog/post.md`.
 
 ## What it measures, and why each part exists
 
