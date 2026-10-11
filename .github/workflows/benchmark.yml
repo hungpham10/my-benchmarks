@@ -46,9 +46,10 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    # Full scale is build (~2) + up (~1) + ingest (~1) + footprint + query
-    # (~36) + parity (~1). 120 leaves room for a slow image pull day.
-    timeout-minutes: 120
+    # Full scale is build (~2) + build-k6 (~3) + up (~1) + ingest (~1) +
+    # footprint + query (~36-108) + k6 matrix (30 cells x 180s ≈ 90) + parity (~1).
+    # 240 leaves room for a slow image pull day and warm cache misses.
+    timeout-minutes: 240
 
     # Everything the benchmark needs lives in one subdirectory, but GitHub only
     # reads workflows from ./.github/workflows. So the workflow sits at the repo
@@ -102,6 +103,8 @@ jobs:
             echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
             echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
             echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
+            echo 'K6_VUS=1'            >> "$GITHUB_ENV"
+            echo 'K6_DURATION=60s'     >> "$GITHUB_ENV"
             echo "smoke (pull_request)"
           elif [ "${{ inputs.scale }}" = "smoke" ]; then
             echo 'JOBS=2'          >> "$GITHUB_ENV"
@@ -109,6 +112,8 @@ jobs:
             echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
             echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
             echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
+            echo 'K6_VUS=1'            >> "$GITHUB_ENV"
+            echo 'K6_DURATION=60s'     >> "$GITHUB_ENV"
             echo "smoke (dispatch)"
           else
             echo "full"
@@ -152,6 +157,9 @@ jobs:
 
       - name: Build the bench image
         run: make build
+
+      - name: Build the k6 image
+        run: make build-k6
 
       # After the build, immediately before the run: the stack is up a few
       # seconds before the targets rather than minutes, and --no-deps keeps the
