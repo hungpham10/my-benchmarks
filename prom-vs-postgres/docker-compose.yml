@@ -128,6 +128,30 @@ services:
       postgres:
         condition: service_healthy
 
+  # k6 load driver. Same sequential discipline as `bench`: a scenario runs
+  # against one backend at a time. The image is built from bench/k6/ because
+  # the PostgreSQL half of the suite needs the xk6-sql extension.
+  k6:
+    build:
+      context: ./bench/k6
+    container_name: bench-k6
+    profiles: ["k6"]
+    environment:
+      PROM_URL: http://prometheus:9090
+      PG_DSN: postgres://bench:bench@postgres:5432/bench?sslmode=disable
+      BACKEND: "${K6_BACKEND:-prometheus}"
+      QUERY_NAME: "${K6_QUERY:-q1_counter_rate}"
+      BENCH_RUN_ID: ${BENCH_RUN_ID:-}
+      BENCH_COMMIT: ${BENCH_COMMIT:-}
+    volumes:
+      - ./results:/results
+      - ./bench/k6:/scripts:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   # --- Monitoring ---------------------------------------------------------
   #
   # Opt-in via `--profile monitoring`, and deliberately NOT part of a measured

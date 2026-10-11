@@ -160,6 +160,7 @@ class ResourceWindow:
 
     def __enter__(self):
         self.samples = []
+        self.series = []
         self.started = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -169,11 +170,22 @@ class ResourceWindow:
     def _loop(self):
         # Sample on a timer. Collecting only at phase start and end would miss
         # the peak entirely, and the peak is the number that shows whether a
-        # target fits its envelope.
+        # target fits its envelope. Every sample is also appended to the raw
+        # series, which is what makes a CPU/memory/disk curve plottable later.
+        disk_every = 3  # du is the expensive call; ~6s at INTERVAL=2
+        count = 0
         while not self._stop.is_set():
             got = sample_stats()
             if got:
                 self.samples.append(got)
+                entry = {"t": round(time.monotonic() - self.started, 2),
+                         "containers": got}
+                if count % disk_every == 0:
+                    entry["prom_disk_bytes"] = _du("bench-prometheus", "/prometheus")
+                    entry["pg_disk_bytes"] = _du(
+                        "bench-postgres", _pg_data_dir())
+                self.series.append(entry)
+            count += 1
             self._stop.wait(self.INTERVAL)
 
     def __exit__(self, *exc):
@@ -230,6 +242,21 @@ def read_env_file():
     return values
 
 
+def save_series(name, window):
+    """Dump a phase's raw samples so the CPU/memory/disk curve survives.
+
+    results/resource_*.json keeps only the peak, which cannot show the shape
+    of a run: a container that ramped to 2 GB and dropped looks identical to
+    one that sat at 2 GB. The series file is the evidence for that distinction.
+    """
+    path = os.path.join(RESULTS, name)
+    os.makedirs(RESULTS, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump({"seconds": round(window.seconds, 2),
+                   "samples": window.series}, fh, indent=1)
+    log("wrote %s" % os.path.relpath(path, ROOT))
+
+
 def phase_up():
     log("starting Prometheus and PostgreSQL")
     compose("up", "-d", "--wait", "--wait-timeout", "180", *STACK)
@@ -268,6 +295,7 @@ def phase_ingest():
         per_target = load("ingest.json") or []
         resource[target] = {"seconds": round(window.seconds, 2), **window.peak}
         log("  %s done in %.1fs" % (target, window.seconds))
+        save_series("resource_ingest_%s_series.json" % target, window)
     if manifest:
         log("window %s .. %s ms, %s samples"
             % (manifest.get("t_start_ms"), manifest.get("t_end_ms"),
@@ -402,6 +430,7 @@ def phase_query():
         "exit_code": result.returncode,
     }
     save("resource_query.json", payload)
+    save_series("resource_query_series.json", window)
     if result.returncode != 0:
         log("bench exited %d; partial results may exist" % result.returncode)
     return load("query.json") or payload
@@ -422,16 +451,124 @@ def phase_report():
     return {"rendered": True}
 
 
+def write_queries_manifest():
+    """Export the query shapes to JSON for the k6 script.
+
+    queries.py stays the single source of truth; k6 only reads this file.
+    Placeholders are inlined because the xk6-sql Postgres driver does not
+    accept psycopg3's %s parameters: the two `%s` placeholders become literal
+    ISO timestamps from the dataset manifest.
+    """
+    manifest = load("dataset.json") or {}
+    start_ms = int(manifest["t_start_ms"])
+    end_ms = int(manifest["t_end_ms"])
+
+    def inline(sql_text, name):
+        if name == "q5_short_range":
+            end_ms_local = start_ms + Q.SHORT_RANGE_MS
+        else:
+            end_ms_local = end_ms
+        text = sql_text
+        # Quote every placeholder first, then substitute in order, so the
+        # second pass cannot accidentally re-match an ISO literal.
+        text = text.replace("%s::timestamptz", "'%s'::timestamptz")
+        bounds = (start_ms, end_ms_local)
+        for ms in bounds:
+            iso = time.strftime("%Y-%m-%d %H:%M:%S+00", time.gmtime(ms / 1000.0))
+            text = text.replace("%s", iso, 1)
+        return text
+
+    payload = {
+        "start_s": start_ms / 1000.0,
+        "end_s": end_ms / 1000.0,
+        "step_seconds": Q.STEP_SECONDS,
+        "queries": [
+            {"name": q["name"], "promql": q["promql"],
+             "sql": {name: inline(sql, q["name"])
+                     for name, sql in q["sql"].items()}}
+            for q in Q.QUERIES
+        ],
+    }
+    path = os.path.join(RESULTS, "queries.json")
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=1)
+    log("wrote %s" % os.path.relpath(path, ROOT))
+
+
+def phase_k6():
+    """Concurrency load, one scenario at a time, CPU/memory/disk logged.
+
+    The scenario matrix is query shape x backend x VUS level. Each cell is a
+    separate k6 run with its own --duration, so its Trend series lands in its
+    own summary JSON and its own resource series file. VUS above 1 is what the
+    serial Python loop could never measure: queueing under concurrency.
+    """
+    write_queries_manifest()
+    duration = os.environ.get("K6_DURATION", "180s")
+    vus_levels = os.environ.get("K6_VUS", "1,10").split(",")
+    out_dir = os.path.join(RESULTS, "k6")
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not cloud_url:
+        # Derive from the same Grafana Cloud credentials alloy uses, so there
+        # is one place to fill in. K6_CLOUD_RW_URL overrides the derivation.
+        url = os.environ.get("GRAFANA_CLOUD_URL")
+        cid = os.environ.get("GRAFANA_CLOUD_ID")
+        token = os.environ.get("GRAFANA_CLOUD_TOKEN")
+        env_file = os.path.join(ROOT, "monitoring", ".env.monitoring")
+        values = {}
+        if os.path.exists(env_file):
+            for line in open(env_file):
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    values[k] = v
+                if line.startswith("K6_CLOUD_RW_URL="):
+                    cloud_url = line.split("=", 1)[1].strip()
+        url = url or values.get("GRAFANA_CLOUD_URL")
+        cid = cid or values.get("GRAFANA_CLOUD_ID")
+        token = token or values.get("GRAFANA_CLOUD_TOKEN")
+        if not cloud_url and url and cid and token:
+            cloud_url = url.replace("https://", "https://%s:%s@" % (cid, token), 1)
+
+    results = []
+    for query in Q.QUERIES:
+        for backend in Q.BACKENDS:
+            for vus in vus_levels:
+                name = "%s_%s_vus%s" % (query["name"], backend, vus)
+                log("k6 scenario %s, %s" % (name, duration))
+                outs = ["--out", "experimental-prometheus-rw="
+                        "http://monitoring-prometheus:9090/api/v1/write"]
+                if cloud_url:
+                    outs += ["--out", "experimental-prometheus-rw=%s" % cloud_url]
+                args = (["run", "--vus", vus, "--duration", duration,
+                         "--summary-export", os.path.join("/results", "k6",
+                                                        "summary_%s.json" % name),
+                         *outs, "/scripts/main.js"])
+                with ResourceWindow() as window:
+                    env = dict(os.environ, K6_BACKEND=backend,
+                               K6_QUERY=query["name"])
+                    result = compose("--profile", "k6", "run", "--rm", "k6",
+                                     *args, check=False, env=env)
+                save_series("k6_%s_series.json" % name, window)
+                results.append({"scenario": name, "exit_code": result.returncode,
+                                "seconds": round(window.seconds, 2)})
+                log("  exit %d in %.1fs" % (result.returncode, window.seconds))
+    save("k6_scenarios.json", results)
+    return results
+
+
 PHASES = {
     "up": phase_up,
     "ingest": phase_ingest,
     "footprint": phase_footprint,
     "query": phase_query,
+    "k6": phase_k6,
     "parity": phase_parity,
     "report": phase_report,
 }
 
-ORDER = ["up", "ingest", "footprint", "query", "parity", "report"]
+ORDER = ["up", "ingest", "footprint", "query", "k6", "parity", "report"]
 
 
 def main():
