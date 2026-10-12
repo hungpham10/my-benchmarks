@@ -546,8 +546,14 @@ def phase_k6():
 
     # k6's remote-write output takes the destination from
     # K6_PROMETHEUS_RW_SERVER_URL and ignores a URL appended to the --out flag.
-    # It supports exactly one such output, so a run pushes to the local
-    # monitoring TSDB when one is up and to Grafana Cloud otherwise.
+    # It supports exactly one such output, so a run has to choose.
+    #
+    # Grafana Cloud wins when credentials exist, because it is the only
+    # destination that outlives the run. Alloy forwards the operational metrics
+    # it scrapes to both local and Cloud, but nothing re-reads the local
+    # monitoring TSDB and forwards it on: series that k6 writes into
+    # monitoring-prometheus stay there, so a Cloud-only run that prefers local
+    # produces load-test numbers nobody can see once the runner is gone.
     #
     # Never leave the destination unset: with the output enabled and no env,
     # k6 falls back to http://localhost:9090/api/v1/write -- which from the
@@ -555,13 +561,14 @@ def phase_k6():
     # this benchmark reports. Writing k6's own metrics into it would move that
     # headline number. So: only enable the output when there is a real
     # destination, and always set the env explicitly.
-    push_url = ""
-    if _container_running("bench-monitoring-prometheus"):
+    push_url = cloud_url
+    if push_url:
+        log("k6 metrics will be pushed to Grafana Cloud")
+    elif _container_running("bench-monitoring-prometheus"):
         push_url = "http://monitoring-prometheus:9090/api/v1/write"
-    elif cloud_url:
-        push_url = cloud_url
+        log("k6 metrics will be pushed to the local monitoring TSDB")
     else:
-        log("no monitoring TSDB and no Grafana Cloud credentials; "
+        log("no Grafana Cloud credentials and no local monitoring TSDB; "
             "k6 will not push its metrics anywhere")
     outs = ["--out", "experimental-prometheus-rw"] if push_url else []
 
