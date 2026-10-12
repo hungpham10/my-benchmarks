@@ -30,6 +30,13 @@ QUERIES = [
     ("Postgres database size",  "count(pg_database_size_bytes)"),
     ("Postgres statements",     "count(pg_stat_statements_calls_total)"),
     ("Postgres backends",       "count(pg_stat_database_numbackends)"),
+    # The k6 Trend is remote-written straight into the monitoring TSDB, so it
+    # is the one signal here that does not come from a scrape. That makes it
+    # the easiest to lose silently: with K6_PROMETHEUS_RW_SERVER_URL unset the
+    # output falls back to its own default, a POST to localhost:9090 on the
+    # runner. Nothing is listening, k6 reports success, and the load numbers
+    # simply never arrive. Checking for them turns that into a failed job.
+    ("k6 query latency",        "count(k6_query_duration_ms_p99)"),
 ]
 
 
