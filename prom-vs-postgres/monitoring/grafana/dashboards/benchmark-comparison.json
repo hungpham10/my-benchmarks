@@ -510,7 +510,7 @@
           "type": "prometheus",
           "uid": "bench-monitoring"
         },
-        "query": "label_values(k6_prom_requests_total, run_id)",
+        "query": "label_values(up, run_id)",
         "includeAll": true,
         "multi": true,
         "refresh": 2,

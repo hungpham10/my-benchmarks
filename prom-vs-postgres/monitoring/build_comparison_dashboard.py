@@ -172,7 +172,14 @@ def build():
         "templating": {"list": [{
             "name": "run_id", "label": "Run", "type": "query",
             "datasource": DS_LOCAL,
-            "query": 'label_values(k6_prom_requests_total, run_id)',
+            # Sourced from `up`, not from a k6 metric. k6 only runs in one
+            # phase of a run, so a variable built from its metrics has no
+            # values for the rest of the time -- and an empty variable
+            # interpolates to the empty string, which turns `run_id=~"$run_id"`
+            # into `run_id=~""` and blanks every filtered panel on the
+            # dashboard, including the CPU and disk ones that have data the
+            # whole time. `up` carries run_id continuously.
+            "query": "label_values(up, run_id)",
             "includeAll": True, "multi": True, "refresh": 2, "sort": 2,
         }]},
     }
