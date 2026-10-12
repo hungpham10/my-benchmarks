@@ -120,6 +120,18 @@ def main():
     if not drift:
         print(f"  ok     {BASE.name} and {CLOUD.name} agree")
 
+    # The Cloud dashboard is generated from the provisioned one. If it has
+    # drifted, every panel added since is simply missing from Cloud, and
+    # nobody notices until they go looking for a graph that never appears.
+    rc = subprocess.run([sys.executable,
+                         str(pathlib.Path(__file__).parent / "sync_cloud_dashboard.py")],
+                        capture_output=True, text=True)
+    if rc.returncode != 0:
+        print(f"  STALE  {(rc.stdout + rc.stderr).strip()}")
+        failed.append("cloud dashboard stale")
+    else:
+        print("  ok     Grafana Cloud dashboard matches the provisioned one")
+
     broken_push = remote_write_health()
     if broken_push:
         print(f"  BROKEN {broken_push}")
