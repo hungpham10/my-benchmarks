@@ -704,7 +704,8 @@ def phase_k6():
                 with ResourceWindow() as window:
                     env = dict(os.environ, K6_BACKEND=backend,
                                K6_QUERY=query["name"],
-                               K6_PROMETHEUS_RW_SERVER_URL=push_url)
+                               K6_PROMETHEUS_RW_SERVER_URL=push_url,
+                               K6_PROMETHEUS_RW_FLUSH_INTERVAL=FLUSH_INTERVAL)
                     result = compose("--profile", "k6", "run", "--rm", "--no-deps",
                                      "k6", *args, check=False, env=env,
                                      capture_output=True)
@@ -875,9 +876,21 @@ def phase_saturation():
     return payload
 
 
+# k6's remote-write output defaults to a flush interval far longer than a
+# scenario, so a counter is pushed once, at the end. One point is enough to
+# report a number and useless for a chart: rate() needs two, and a "throughput
+# over load" panel drawn from one point is a horizontal line.
+FLUSH_INTERVAL = "3s"
+
+
 def _run_saturation_once(backend, query_name, push_url, outs, label=None,
                          stage_spec=None):
     """Run concurrent.js once and read its summary back into an entry."""
+    # k6 writes its summary into /results/k6 and will not create the directory,
+    # so a fresh checkout yields exit 0 with no file -- which parses as "the
+    # scenario produced nothing" rather than "the path was never made". Done
+    # here, next to the write it guards, so no caller has to remember it.
+    os.makedirs(os.path.join(RESULTS, "k6"), exist_ok=True)
     label = label or query_name
     summary = os.path.join("/results", "k6", "saturation_%s.json" % label)
     log("k6 concurrent run %s (stages %s)" % (label, stage_spec))
@@ -888,6 +901,7 @@ def _run_saturation_once(backend, query_name, push_url, outs, label=None,
             "SATURATION_STAGES": stage_spec or "",
             "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", ""),
             "BENCH_COMMIT": os.environ.get("BENCH_COMMIT", ""),
+            "K6_PROMETHEUS_RW_FLUSH_INTERVAL": FLUSH_INTERVAL,
         })
         # The script no longer reads CONCURRENT_VUS / CONCURRENT_DURATION: the
         # stages carry the ramp, and inheriting a stale value would silently
