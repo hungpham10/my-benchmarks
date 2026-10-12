@@ -181,7 +181,8 @@ class ResourceWindow:
         # ticks out of three, and a series that disappears from a textfile is
         # stale, not zero -- the disk panel goes blank for as long as the phase
         # runs.
-        last_disk = {"prom_disk_bytes": None, "pg_disk_bytes": None}
+        last_disk = {"prom_disk_bytes": None, "pg_disk_bytes": None,
+                       "prom_wal_bytes": None, "pg_wal_bytes": None}
         while not self._stop.is_set():
             got = sample_stats()
             if got:
@@ -189,9 +190,14 @@ class ResourceWindow:
                 entry = {"t": round(time.monotonic() - self.started, 2),
                          "containers": got}
                 if count % disk_every == 0:
-                    entry["prom_disk_bytes"] = _du("bench-prometheus", "/prometheus")
-                    entry["pg_disk_bytes"] = _du(
-                        "bench-postgres", _pg_data_dir())
+                    pg_dir = _pg_data_dir()
+                    entry["prom_disk_bytes"] = _du(
+                        "bench-prometheus", "/prometheus")
+                    entry["prom_wal_bytes"] = _du(
+                        "bench-prometheus", "/prometheus/wal")
+                    entry["pg_disk_bytes"] = _du("bench-postgres", pg_dir)
+                    entry["pg_wal_bytes"] = _du(
+                        "bench-postgres", os.path.join(pg_dir, "pg_wal"))
                     for key in last_disk:
                         last_disk[key] = entry[key]
                 else:
@@ -274,12 +280,23 @@ def _write_textfile(entry):
             mem = stats.get("mem_bytes")
             if mem is not None:
                 lines.append('bench_mem_bytes{system="%s"} %d' % (system, int(mem)))
-        for system, field in (("prometheus", "prom_disk_bytes"),
-                              ("postgres", "pg_disk_bytes")):
+        for system, field, wal_field in (
+                ("prometheus", "prom_disk_bytes", "prom_wal_bytes"),
+                ("postgres", "pg_disk_bytes", "pg_wal_bytes")):
             value = entry.get(field)
+            wal = entry.get(wal_field)
             if value is not None:
                 lines.append('bench_disk_bytes{system="%s"} %d'
                              % (system, int(value)))
+            # WAL excluded, which is the figure the bytes-per-sample headline
+            # in results/report.md is computed from. Without this the panel
+            # compares Prometheus' post-WAL size against PostgreSQL's
+            # including-WAL size, and overstates the gap: for the recorded run
+            # it read 49x where the report says 59.9x, in the opposite
+            # direction from the number being published.
+            if value is not None and wal is not None:
+                lines.append('bench_disk_stored_bytes{system="%s"} %d'
+                             % (system, max(0, int(value) - int(wal))))
         tmp = os.path.join(TEXTFILE_DIR, "bench.prom.tmp")
         with open(tmp, "w") as fh:
             fh.write("\n".join(lines) + "\n")

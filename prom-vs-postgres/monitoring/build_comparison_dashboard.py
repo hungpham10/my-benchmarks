@@ -144,16 +144,28 @@ def build():
         12, y, unit="bytes"))
     y += 8
     panels.append(panel(
-        "On disk",
-        "du of each system's own data directory, sampled through the run. This "
-        "is the number the bytes-per-sample figure is computed from. Not "
-        "cAdvisor's container_fs_usage_bytes: under Colima it carries no "
-        "container label and reports the host filesystem for every series, so a "
-        "panel over it draws one 25GB line for both systems and looks entirely "
-        "plausible.",
-        [('bench_disk_bytes{system="prometheus"}', "Prometheus"),
-         ('bench_disk_bytes{system="postgres"}', "PostgreSQL")],
-        0, y, w=24, unit="bytes"))
+        "On disk, stored data only (WAL excluded)",
+        "This is the figure the bytes-per-sample headline in results/report.md "
+        "is computed from, so the panel and the report cannot disagree. WAL is "
+        "excluded on both sides: it is transient replay state, not data that "
+        "is being kept. Comparing Prometheus post-WAL against PostgreSQL "
+        "including-WAL reads 49x on the recorded run where the report says "
+        "59.9x. Not cAdvisor's container_fs_usage_bytes: under Colima it "
+        "carries no container label and reports the host filesystem for every "
+        "series, so a panel over it draws one 25GB line for both systems.",
+        [('bench_disk_stored_bytes{system="prometheus"}', "Prometheus"),
+         ('bench_disk_stored_bytes{system="postgres"}', "PostgreSQL")],
+        0, y, unit="bytes"))
+    y += 8
+    panels.append(panel(
+        "On disk, including WAL",
+        "The whole data directory, so the difference from the panel on the left "
+        "is the write-ahead log. PostgreSQL's is several times the size of its "
+        "stored data, which is worth seeing next to it rather than folded into "
+        "a single number.",
+        [('bench_disk_bytes{system="prometheus"}', "Prometheus (incl. WAL)"),
+         ('bench_disk_bytes{system="postgres"}', "PostgreSQL (incl. WAL)")],
+        12, y, unit="bytes"))
 
     return {
         "__inputs": [],
@@ -172,7 +184,14 @@ def build():
         "templating": {"list": [{
             "name": "run_id", "label": "Run", "type": "query",
             "datasource": DS_LOCAL,
-            "query": 'label_values(k6_prom_requests_total, run_id)',
+            # Sourced from `up`, not from a k6 metric. k6 only runs in one
+            # phase of a run, so a variable built from its metrics has no
+            # values for the rest of the time -- and an empty variable
+            # interpolates to the empty string, which turns `run_id=~"$run_id"`
+            # into `run_id=~""` and blanks every filtered panel on the
+            # dashboard, including the CPU and disk ones that have data the
+            # whole time. `up` carries run_id continuously.
+            "query": "label_values(up, run_id)",
             "includeAll": True, "multi": True, "refresh": 2, "sort": 2,
         }]},
     }
