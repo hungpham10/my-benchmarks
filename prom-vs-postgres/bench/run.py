@@ -186,6 +186,7 @@ class ResourceWindow:
                     entry["pg_disk_bytes"] = _du(
                         "bench-postgres", _pg_data_dir())
                 self.series.append(entry)
+                _write_textfile(entry)
             count += 1
             self._stop.wait(self.INTERVAL)
 
@@ -210,6 +211,69 @@ class ResourceWindow:
 
 
 # --- phases ---------------------------------------------------------------
+
+def _reset_textfile():
+    try:
+        os.makedirs(TEXTFILE_DIR, exist_ok=True)
+        open(os.path.join(TEXTFILE_DIR, "bench.prom"), "w").close()
+    except OSError:
+        pass
+
+
+# Where the textfile collector reads from. Alloy mounts this directory and
+# scrapes it, which is how the numbers written below reach a dashboard.
+TEXTFILE_DIR = os.path.join(ROOT, "monitoring", "textfile")
+
+
+def _write_textfile(entry):
+    """Expose this phase's CPU/memory/disk samples to the monitoring stack.
+
+    Why not cAdvisor, which is already scraping: under Colima its
+    container_fs_usage_bytes carries no container label and reports the host
+    filesystem for every series, and its container CPU is documented as
+    untrustworthy. A panel over those draws one 25GB line for both systems and
+    it looks entirely plausible. These samples come from `docker stats` and
+    `du`, which is the same source the headline resource figures in the report
+    come from, so the dashboard and results/report.md cannot disagree.
+
+    Rewritten in place on every sample rather than appended to, and with NO
+    timestamp on each line.
+
+    Both details are forced. The textfile collector rejects a file carrying
+    client-side timestamps outright -- "contains unsupported client-side
+    timestamps, skipping entire file" -- so an appended, timestamped file
+    produces nothing at all rather than something slightly wrong. And with no
+    timestamp it exposes one sample per series, the latest, stamped at scrape
+    time; a curve therefore has to come from the file being rewritten in step
+    with the scrape interval (5s in the Alloy config) rather than from keeping
+    history in the file. The sample interval here is 2s, so each scrape lands
+    on fresh data.
+    """
+    try:
+        os.makedirs(TEXTFILE_DIR, exist_ok=True)
+        lines = []
+        for system in ("prometheus", "postgres"):
+            stats = entry.get("containers", {}).get(system) or {}
+            cpu = stats.get("cpu_pct")
+            if cpu is not None:
+                lines.append('bench_cpu_pct{system="%s"} %s' % (system, cpu))
+            mem = stats.get("mem_bytes")
+            if mem is not None:
+                lines.append('bench_mem_bytes{system="%s"} %d' % (system, int(mem)))
+        for system, field in (("prometheus", "prom_disk_bytes"),
+                              ("postgres", "pg_disk_bytes")):
+            value = entry.get(field)
+            if value is not None:
+                lines.append('bench_disk_bytes{system="%s"} %d'
+                             % (system, int(value)))
+        tmp = os.path.join(TEXTFILE_DIR, "bench.prom.tmp")
+        with open(tmp, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(tmp, os.path.join(TEXTFILE_DIR, "bench.prom"))
+    except OSError:
+        # The dashboard is a convenience; losing it must never abort a phase.
+        pass
+
 
 # k6's own wording when a remote-write POST fails. Matched against the run's
 # combined output: exit code is 0 either way, so this string is the only signal
@@ -313,6 +377,7 @@ def phase_up():
 
 
 def phase_ingest():
+    _reset_textfile()
     manifest = load("dataset.json") or {}
     per_target = []
     resource = {}
@@ -447,6 +512,7 @@ def phase_footprint():
 
 
 def phase_query():
+    _reset_textfile()
     manifest = load("dataset.json") or {}
     log("running %d iterations x %d shapes x %d backends"
         % (int(os.environ.get("QUERY_ITERATIONS", "300")),
@@ -526,6 +592,7 @@ def write_queries_manifest():
 
 
 def phase_k6():
+    _reset_textfile()
     """Concurrency load, one scenario at a time, CPU/memory/disk logged.
 
     The scenario matrix is query shape x backend x VUS level. Each cell is a
@@ -627,17 +694,165 @@ def phase_k6():
     return results
 
 
+def _k6_concurrent_env(push_url):
+    """The env a concurrent k6 run needs, with the same push rules as phase_k6."""
+    return dict(os.environ, K6_PROMETHEUS_RW_SERVER_URL=push_url)
+
+
+def _parse_k6_summary(relative_path):
+    """Pull the per-target TPS and latency out of one k6 summary export.
+
+    `relative_path` is relative to the benchmark root, not to RESULTS: the
+    file is written into the results/ directory, which the container sees
+    mounted at /results.
+    """
+    path = os.path.join(ROOT, relative_path)
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        metrics = json.load(fh).get("metrics", {})
+
+    # k6 writes counters as {"rate": .., "count": ..} and trends as
+    # {"min":..,"med":..,"p(90)":..,"p(95)":..,"max":..}, both at the top level
+    # of the entry. Older exports wrapped the same fields in "values"; accept
+    # that too so a file written by a different k6 still parses.
+    def entry(name):
+        raw = metrics.get(name)
+        if raw is None:
+            return {}
+        return raw.get("values", raw) or {}
+
+    def counter(name):
+        return float(entry(name).get("rate", 0))
+
+    def trend(name):
+        values = entry(name)
+        return {k: values.get(k) for k in ("p(90)", "p(95)", "max")}
+
+    return {
+        "prometheus_tps": counter("prom_requests"),
+        "postgres_tps": counter("pg_requests"),
+        "prometheus": trend("prom_query_duration_ms"),
+        "postgres": trend("pg_query_duration_ms"),
+    }
+
+
+def phase_saturation():
+    _reset_textfile()
+    """Walk both systems up together until throughput stops responding to load.
+
+    A TPS number is meaningless without the load that produced it. The point of
+    this phase is the knee: the last step where adding virtual users still buys
+    throughput, after which the extra users only add latency. That is where the
+    two systems can be compared on capacity rather than on a single unstated
+    load, and it is the only reason TPS is worth reporting at all.
+
+    Both systems are driven in ONE k6 run, two scenarios, same VU level on
+    both arms. Running them in sequence would mean comparing different instants
+    and letting the second one start against a warmer or colder system than the
+    first.
+
+    This measures something different from phase_query, and the two must not be
+    compared with each other. phase_query asks which system is faster with
+    nothing else running; this asks what each does when both are loaded. The
+    numbers are only valid as long as the host can serve both: the envelope in
+    .env gives 1.5 CPU each, and a 4-core host has one core left for the
+    runner and the OS. If that remainder is ever the bottleneck, these figures
+    are measuring the host, not the databases.
+    """
+    write_queries_manifest()
+    steps = [int(v) for v in os.environ.get(
+        "SATURATION_VUS", "1,2,4,8,16,32").split(",") if v.strip()]
+    duration = os.environ.get("SATURATION_DURATION", "30s")
+    queries = [q["name"] for q in Q.QUERIES
+               if q["name"] in os.environ.get("SATURATION_QUERIES", "").split(",")] \
+        or [Q.QUERIES[0]["name"]]
+    backend = os.environ.get("SATURATION_PG_BACKEND", "metrics_norm_brin")
+    cloud_url = os.environ.get("K6_CLOUD_RW_URL") or ""
+    if not cloud_url:
+        values = read_env_file("monitoring/.env.monitoring")
+        url = values.get("GRAFANA_CLOUD_URL")
+        cid = values.get("GRAFANA_CLOUD_ID")
+        token = values.get("GRAFANA_CLOUD_TOKEN")
+        cloud_url = values.get("K6_CLOUD_RW_URL") or ""
+        if not cloud_url and url and cid and token:
+            cloud_url = url.replace("https://", "https://%s:%s@" % (cid, token), 1)
+    push_url = cloud_url or (
+        "http://monitoring-prometheus:9090/api/v1/write"
+        if _container_running("bench-monitoring-prometheus") else "")
+    outs = ["--out", "experimental-prometheus-rw"] if push_url else []
+
+    out_dir = os.path.join(RESULTS, "k6")
+    os.makedirs(out_dir, exist_ok=True)
+    results = []
+    for query_name in queries:
+        curve = []
+        for vus in steps:
+            label = "%s_vus%d" % (query_name, vus)
+            log("saturation %s" % label)
+            summary = os.path.join("/results", "k6", "saturation_%s.json" % label)
+            with ResourceWindow() as window:
+                env = _k6_concurrent_env(push_url)
+                env.update({
+                    "BACKEND": backend, "QUERY_NAME": query_name,
+                    "CONCURRENT_VUS": str(vus), "CONCURRENT_DURATION": duration,
+                    "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", ""),
+                    "BENCH_COMMIT": os.environ.get("BENCH_COMMIT", ""),
+                })
+                compose("--profile", "k6", "run", "--rm", "--no-deps", "k6",
+                        "run", "--summary-export", summary, *outs,
+                        "/scripts/concurrent.js", check=False, env=env)
+            entry = _parse_k6_summary(os.path.join("results", "k6",
+                                                   os.path.basename(summary)))
+            save_series("k6_saturation_%s_series.json" % label, window)
+            if entry:
+                entry.update({"query": query_name, "vus": vus,
+                              "wall_seconds": round(window.seconds, 2)})
+                curve.append(entry)
+                log("  prom %.0f req/s (p95 %s ms) | pg %.0f req/s (p95 %s ms)"
+                    % (entry["prometheus_tps"],
+                       entry["prometheus"]["p(95)"],
+                       entry["postgres_tps"],
+                       entry["postgres"]["p(95)"]))
+        results.append({"query": query_name, "backend": backend,
+                        "duration": duration, "curve": curve,
+                        "knee": _saturation_knee(curve)})
+    save("k6_saturation.json", results)
+    return results
+
+
+def _saturation_knee(curve):
+    """The last step where extra VUs still bought throughput.
+
+    Found from the Prometheus arm, which is the faster of the two and so
+    reaches its ceiling first; reporting one knee rather than two keeps the
+    question simple -- after which point does adding load stop helping.
+
+    Returns None when the curve never turns over, which is a real answer at
+    small scale: if throughput is still climbing at the last step, the knee is
+    above the range measured and the honest report is "not reached".
+    """
+    if len(curve) < 2:
+        return None
+    for earlier, later in zip(curve, curve[1:]):
+        if later["prometheus_tps"] <= earlier["prometheus_tps"]:
+            return earlier["vus"]
+    return None
+
+
 PHASES = {
     "up": phase_up,
     "ingest": phase_ingest,
     "footprint": phase_footprint,
     "query": phase_query,
     "k6": phase_k6,
+    "saturation": phase_saturation,
     "parity": phase_parity,
     "report": phase_report,
 }
 
-ORDER = ["up", "ingest", "footprint", "query", "k6", "parity", "report"]
+ORDER = ["up", "ingest", "footprint", "query", "k6", "saturation",
+         "parity", "report"]
 
 
 def main():

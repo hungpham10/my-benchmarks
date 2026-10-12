@@ -207,6 +207,12 @@ services:
       - /:/rootfs:ro
       - /sys:/sys:ro
       - alloy-data:/var/lib/alloy/data
+      # The harness writes its own CPU/memory/disk samples here as they are
+      # taken, and the textfile collector below turns them into series. That
+      # is what gives the dashboard trustworthy per-system figures: cAdvisor's
+      # container_fs_usage_bytes reports the host filesystem for every series
+      # under Colima, so a panel over it draws the same line for both systems.
+      - ./monitoring/textfile:/var/lib/bench-textfile:ro
     # Grafana Cloud credentials, when monitoring/.env.monitoring exists. Alloy
     # reads them with sys.env(); config.alloy never mentions them, so a missing
     # file is the normal case and not an error.

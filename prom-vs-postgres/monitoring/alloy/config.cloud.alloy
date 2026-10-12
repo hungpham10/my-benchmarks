@@ -42,7 +42,12 @@
 //     grafana/alloy:latest validate /etc/alloy/config.alloy
 
 prometheus.exporter.unix "host" {
-  enable_collectors = ["cpu", "filesystem", "meminfo", "diskstats", "netdev", "vmstat"]
+  enable_collectors = ["cpu", "filesystem", "meminfo", "diskstats", "netdev", "vmstat", "textfile"]
+
+  // Where bench/run.py writes its own per-system samples. See the note below.
+  textfile {
+    directory = "/var/lib/bench-textfile"
+  }
 
   // The benchmark's data volumes. Container CPU and memory come from cAdvisor;
   // filesystem usage has to be scraped from the host because a container cannot
@@ -115,6 +120,32 @@ prometheus.scrape "postgres" {
   forward_to      = [prometheus.relabel.trim.receiver]
   scrape_interval = "10s"
 }
+
+// The harness's own measurements of the two systems under test.
+//
+// bench/run.py samples CPU and memory with `docker stats` and disk with `du`
+// as each phase runs, and appends them to monitoring/textfile/bench.prom. This
+// collector exposes them.
+//
+// The obvious alternative was a cAdvisor panel on container_fs_usage_bytes,
+// and it is the wrong one here: under Colima that metric carries no container
+// label and reports the host filesystem for every series, so a panel over it
+// draws one 25GB line for both systems and looks entirely plausible. These
+// numbers come from the same source as the headline resource figures in
+// results/report.md, so the two cannot disagree.
+// The harness's own measurements of the two systems under test.
+//
+// bench/run.py samples CPU and memory with `docker stats` and disk with `du`
+// as each phase runs, and appends them to monitoring/textfile/bench.prom.
+// prometheus.exporter.unix exposes them through its textfile collector, which
+// is a collector of that component rather than a component of its own.
+//
+// The obvious alternative was a cAdvisor panel on container_fs_usage_bytes,
+// and it is the wrong one here: under Colima that metric carries no container
+// label and reports the host filesystem for every series, so a panel over it
+// draws one 25GB line for both systems and looks entirely plausible. These
+// numbers come from the same source as the headline resource figures in
+// results/report.md, so the two cannot disagree.
 
 // Alloy's own health, and specifically whether its remote-write to Grafana
 // Cloud is actually connecting.
