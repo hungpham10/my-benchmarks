@@ -37,6 +37,12 @@ QUERIES = [
     # runner. Nothing is listening, k6 reports success, and the load numbers
     # simply never arrive. Checking for them turns that into a failed job.
     ("k6 query latency",        "count(k6_query_duration_ms_p99)"),
+    # Alloy's own dialer counter for the remote_write: evidence that the push
+    # path has connected at all. Its failure counter is deliberately NOT in
+    # this list -- zero failures is the healthy value, and every entry here is
+    # treated as a failure when it reads zero. It is reported by
+    # remote_write_health() instead.
+    ("alloy remote-write up", "sum(net_conntrack_dialer_conn_established_total{dialer_name=\"remote_storage_write_client\"})"),
 ]
 
 
@@ -83,6 +89,27 @@ def runs() -> list[tuple[str, str, int]]:
              int(float(r["value"][1]))) for r in result]
 
 
+def remote_write_health():
+    """Report remote-write failures, or None when the path is healthy.
+
+    Separate from QUERIES because the polarity is inverted: these counters are
+    cumulative and start at zero, so a run that never pushed anything and a
+    run that pushed cleanly look identical at t=0. A non-zero value, though,
+    is unambiguous -- the push to Grafana Cloud is not getting through, and
+    with a push-only token nothing at the receiver can contradict that.
+    """
+    try:
+        failed = query(
+            'sum(net_conntrack_dialer_conn_failed_total'
+            '{dialer_name="remote_storage_write_client"})')
+    except Exception:                                       # noqa: BLE001
+        return None
+    if failed:
+        return (f"alloy could not connect to the remote-write endpoint "
+                f"({failed} failed dials) - metrics are not reaching Grafana Cloud")
+    return None
+
+
 def main():
     failed = []
 
@@ -92,6 +119,11 @@ def main():
         failed.append(problem)
     if not drift:
         print(f"  ok     {BASE.name} and {CLOUD.name} agree")
+
+    broken_push = remote_write_health()
+    if broken_push:
+        print(f"  BROKEN {broken_push}")
+        failed.append("remote_write unreachable")
 
     if under_test_is_clean():
         print("  ok     Prometheus under test holds no monitoring series")

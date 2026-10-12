@@ -116,6 +116,30 @@ prometheus.scrape "postgres" {
   scrape_interval = "10s"
 }
 
+// Alloy's own health, and specifically whether its remote-write to Grafana
+// Cloud is actually connecting.
+//
+// net_conntrack_dialer_conn_failed_total carries dialer_name="remote_storage_
+// write_client" with a reason of refused / timeout / resolution. That is the
+// only signal that distinguishes a healthy push from a Cloud endpoint that has
+// been rejecting us, and it matters here because the token in this project has
+// push scope only: the receiving side cannot be queried to confirm what
+// arrived, so the sender's own counters and logs are the whole story.
+//
+// The irony is not lost -- if the push to Cloud is down, this scrape cannot
+// reach Cloud either. It lands in the local monitoring TSDB and on the local
+// dashboard, which is where you would look to find out why Cloud stopped.
+prometheus.scrape "alloy" {
+  targets = [{
+    "__address__"      = "localhost:12345",
+    "__metrics_path__" = "/metrics",
+    "job"              = "alloy",
+  }]
+
+  forward_to      = [prometheus.relabel.trim.receiver]
+  scrape_interval = "15s"
+}
+
 // Applied to every metric on its way to the remote-write endpoint. Three jobs:
 // give every sample an identity, make cAdvisor's series readable, then delete
 // the parts nobody reads.

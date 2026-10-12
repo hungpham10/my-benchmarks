@@ -67,6 +67,7 @@ def compose(*args, **kwargs):
         stdout=kwargs.get("stdout"),
         stderr=kwargs.get("stderr"),
         env=kwargs.get("env"),
+        capture_output=kwargs.get("capture_output", False),
     )
 
 
@@ -209,6 +210,12 @@ class ResourceWindow:
 
 
 # --- phases ---------------------------------------------------------------
+
+# k6's own wording when a remote-write POST fails. Matched against the run's
+# combined output: exit code is 0 either way, so this string is the only signal
+# that the metrics went anywhere.
+PUSH_FAILURE_MARKER = "Failed to send the time series data to the endpoint"
+
 
 def _container_running(container):
     """True when the named container is up.
@@ -592,11 +599,30 @@ def phase_k6():
                                K6_QUERY=query["name"],
                                K6_PROMETHEUS_RW_SERVER_URL=push_url)
                     result = compose("--profile", "k6", "run", "--rm", "--no-deps",
-                                     "k6", *args, check=False, env=env)
+                                     "k6", *args, check=False, env=env,
+                                     capture_output=True)
+                # k6 exits 0 whether or not the remote-write flush succeeded,
+                # and says so only on stderr. A failed push is invisible in the
+                # exit code, so it has to be read out of the log or the load
+                # numbers are simply lost. The Grafana Cloud token here has
+                # push scope only and cannot be queried to confirm, so this log
+                # line is the only evidence available.
+                output = (result.stdout or "") + (result.stderr or "")
+                push_failed = PUSH_FAILURE_MARKER in output
+                if push_failed and push_url:
+                    log("  PUSH FAILED: k6 could not write to %s" % push_url)
                 save_series("k6_%s_series.json" % name, window)
                 results.append({"scenario": name, "exit_code": result.returncode,
+                                "push_failed": push_failed,
+                                "push_url": push_url if push_url else None,
                                 "seconds": round(window.seconds, 2)})
                 log("  exit %d in %.1fs" % (result.returncode, window.seconds))
+    failed_pushes = [r for r in results if r["push_failed"]]
+    if failed_pushes:
+        # Loud, because every scenario still exits 0 and the report renders
+        # percentiles that look complete. They are complete -- locally.
+        log("WARNING: %d/%d scenarios could not push their metrics to %s"
+            % (len(failed_pushes), len(results), push_url))
     save("k6_scenarios.json", results)
     return results
 

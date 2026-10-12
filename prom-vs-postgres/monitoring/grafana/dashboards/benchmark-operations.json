@@ -657,6 +657,57 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bench-monitoring"
+      },
+      "title": "Remote-write connection failures (alloy)",
+      "description": "Whether the push to Grafana Cloud is actually connecting. Alloy's own dialer counters, not the receiver's: the Cloud token in this project is push-only, so nothing can query what arrived. Any non-zero line here is the reason a run's metrics are missing from Cloud. Visible locally only -- if the push is down, this panel cannot reach Cloud either.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 54
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(net_conntrack_dialer_conn_failed_total{dialer_name=\"remote_storage_write_client\"}[5m]))",
+          "legendFormat": "failed: {{reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(net_conntrack_dialer_conn_established_total{dialer_name=\"remote_storage_write_client\"}[5m]))",
+          "legendFormat": "established/s",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "time": {
