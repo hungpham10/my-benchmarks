@@ -136,6 +136,16 @@ services:
       context: ./bench/k6
     container_name: bench-k6
     profiles: ["k6"]
+    deploy:
+      resources:
+        limits:
+          # The load driver needs its own core. Uncapped, k6 competes with the
+          # very systems it is measuring for one of the host's four, and the
+          # throughput numbers then describe the scheduler as much as the
+          # databases. Bounding memory keeps a runaway scenario from taking
+          # the host with it.
+          cpus: "${K6_CPUS:-1}"
+          memory: ${K6_MEMORY:-1G}
     environment:
       PROM_URL: http://prometheus:9090
       PG_DSN: postgres://bench:bench@postgres:5432/bench?sslmode=disable

@@ -27,9 +27,25 @@ prediction instead of quietly picking the favourable ones.
 
 ## The resource envelope
 
-Prometheus and PostgreSQL get an **identical** budget: `TARGET_CPUS=1.5` and
-`TARGET_MEMORY=4G` each, out of the 4 vCPU / 10 GB the VM provides. The
-leftover core and ~2 GB go to the bench runner and the OS.
+Prometheus and PostgreSQL get an **identical** budget: `TARGET_CPUS=1` and
+`TARGET_MEMORY=4G` each, out of the 4 vCPU / 10 GB the VM provides.
+
+The four cores are accounted for explicitly, because leaving one unassigned is
+how a load test ends up measuring the scheduler:
+
+| | CPUs | Why |
+| --- | --- | --- |
+| Prometheus | 1 | under test |
+| PostgreSQL | 1 | under test |
+| k6 | 1 | generates the load — if it shares a core with a system under test, the throughput number describes k6's own scheduling as much as the database's |
+| OS, Alloy, Grafana, exporters | 1 shared | instrumentation only, never on a measured path |
+
+The load driver was previously uncapped and the targets had 1.5 each. The two
+targets then claimed three cores and left one for k6, Alloy, Grafana and the
+kernel together. Capping all three at one core each made both systems slower
+under load — PostgreSQL by roughly twice as much as Prometheus — which is the
+more honest reading, because it is what each one costs when neither is given a
+head start.
 
 This is what makes the comparison a comparison. Uncapped, Prometheus could
 spend three times the RAM PostgreSQL uses and still be declared the winner, and
@@ -37,6 +53,11 @@ spend three times the RAM PostgreSQL uses and still be declared the winner, and
 design. A query that OOMs or starves on CPU inside the envelope is a real
 property of "what fits here", not a measurement artefact — that is the number a
 reader actually wants.
+
+**The recorded run in `results/` predates this change** and was measured at
+`TARGET_CPUS=1.5` with an uncapped k6. Bytes per sample do not depend on the CPU
+cap, so the disk figures stand; every latency and throughput figure does not.
+Re-run before quoting either.
 
 PostgreSQL's settings are sized to its half of the envelope rather than to the
 whole VM (`shared_buffers=1GB`, `work_mem=64MB`, `max_wal_size=2GB`), which is
@@ -250,8 +271,8 @@ gh workflow run benchmark.yml -f scale=smoke
 ```
 
 The runner needs the same shape as the local VM: the envelope in `.env` gives
-each target 1.5 CPU / 4 GB, so 8 GB of the 16 GB goes to the systems under
-test and the rest to the runner and the OS. Free-tier runners (2 CPU / 7 GB)
+each target 1 CPU / 4 GB and k6 1 CPU, so 8 GB of the 16 GB goes to the
+systems under test and the rest to the runner and the OS. Free-tier runners (2 CPU / 7 GB)
 are too small and will produce numbers that measure the runner.
 
 ## Layout
@@ -312,6 +333,14 @@ test the two structural findings in the write-up:
   disk figure is head chunks, not settled blocks.
 - **Targets are loaded sequentially, never together.** A shared 4-core VM
   would make the two ingest numbers a measurement of the scheduler.
+- **Two load measurements, and they must not be compared with each other.**
+  `make query` and `make k6` drive one system at a time and answer "which is
+  faster". `make saturation` drives both from a single k6 run, two scenarios,
+  same VU on both arms, and answers "what does each do when both are loaded" —
+  which is where throughput is meaningful. Its numbers are only valid while the
+  host can serve both; on a 4-core VM the three capped containers take three
+  cores, so if the remaining one is ever the bottleneck, the figures describe
+  the host and not the databases.
 - **Percentiles need many iterations.** 300 is the floor. At 30 samples a P95
   is indistinguishable from the maximum.
 - **Scale is small on purpose.** At this size PostgreSQL's fixed costs
