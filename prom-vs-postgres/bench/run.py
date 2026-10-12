@@ -532,7 +532,12 @@ def phase_k6():
     out_dir = os.path.join(RESULTS, "k6")
     os.makedirs(out_dir, exist_ok=True)
 
-    cloud_url = os.environ.get("K6_CLOUD_RW_URL")
+    # `or ""` -- never None. With no credentials and no K6_CLOUD_RW_URL this
+    # ends up None, and None goes into the environment dict handed to
+    # subprocess, which rejects it: "expected str, bytes or os.PathLike object,
+    # not NoneType". That is the pull_request run, which is the one case with
+    # no secrets, so it is the case that reached CI first.
+    cloud_url = os.environ.get("K6_CLOUD_RW_URL") or ""
     if not cloud_url:
         # Derive from the same Grafana Cloud credentials alloy uses, so there
         # is one place to fill in. K6_CLOUD_RW_URL overrides the derivation.
@@ -540,7 +545,7 @@ def phase_k6():
         url = os.environ.get("GRAFANA_CLOUD_URL") or values.get("GRAFANA_CLOUD_URL")
         cid = os.environ.get("GRAFANA_CLOUD_ID") or values.get("GRAFANA_CLOUD_ID")
         token = os.environ.get("GRAFANA_CLOUD_TOKEN") or values.get("GRAFANA_CLOUD_TOKEN")
-        cloud_url = values.get("K6_CLOUD_RW_URL")
+        cloud_url = values.get("K6_CLOUD_RW_URL") or ""
         if not cloud_url and url and cid and token:
             cloud_url = url.replace("https://", "https://%s:%s@" % (cid, token), 1)
 
