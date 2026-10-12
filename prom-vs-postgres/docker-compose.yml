@@ -128,6 +128,48 @@ services:
       postgres:
         condition: service_healthy
 
+  # k6 load driver. Same sequential discipline as `bench`: a scenario runs
+  # against one backend at a time. The image is built from bench/k6/ because
+  # the PostgreSQL half of the suite needs the xk6-sql extension.
+  k6:
+    build:
+      context: ./bench/k6
+    container_name: bench-k6
+    profiles: ["k6"]
+    deploy:
+      resources:
+        limits:
+          # The load driver needs its own core. Uncapped, k6 competes with the
+          # very systems it is measuring for one of the host's four, and the
+          # throughput numbers then describe the scheduler as much as the
+          # databases. Bounding memory keeps a runaway scenario from taking
+          # the host with it.
+          cpus: "${K6_CPUS:-1}"
+          memory: ${K6_MEMORY:-1G}
+    environment:
+      PROM_URL: http://prometheus:9090
+      PG_DSN: postgres://bench:bench@postgres:5432/bench?sslmode=disable
+      BACKEND: "${K6_BACKEND:-prometheus}"
+      QUERY_NAME: "${K6_QUERY:-q1_counter_rate}"
+      BENCH_RUN_ID: ${BENCH_RUN_ID:-}
+      BENCH_COMMIT: ${BENCH_COMMIT:-}
+      # k6's remote-write output reads the destination from this variable and
+      # ignores a URL attached to --out. It must be declared here: an env var
+      # set on the `docker compose run` command line is not visible to the
+      # container unless the service declares it, so without this line k6
+      # silently falls back to http://localhost:9090/api/v1/write and POSTs
+      # its metrics at whatever listens there -- which is the Prometheus under
+      # test on a local run.
+      K6_PROMETHEUS_RW_SERVER_URL: "${K6_PROMETHEUS_RW_SERVER_URL:-}"
+    volumes:
+      - ./results:/results
+      - ./bench/k6:/scripts:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   # --- Monitoring ---------------------------------------------------------
   #
   # Opt-in via `--profile monitoring`, and deliberately NOT part of a measured
@@ -175,6 +217,12 @@ services:
       - /:/rootfs:ro
       - /sys:/sys:ro
       - alloy-data:/var/lib/alloy/data
+      # The harness writes its own CPU/memory/disk samples here as they are
+      # taken, and the textfile collector below turns them into series. That
+      # is what gives the dashboard trustworthy per-system figures: cAdvisor's
+      # container_fs_usage_bytes reports the host filesystem for every series
+      # under Colima, so a panel over it draws the same line for both systems.
+      - ./monitoring/textfile:/var/lib/bench-textfile:ro
     # Grafana Cloud credentials, when monitoring/.env.monitoring exists. Alloy
     # reads them with sys.env(); config.alloy never mentions them, so a missing
     # file is the normal case and not an error.

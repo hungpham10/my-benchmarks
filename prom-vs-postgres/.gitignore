@@ -20,3 +20,12 @@ blog/post.html
 
 # Grafana Cloud credentials. The template next to it is committed; this copy is not.
 /monitoring/.env.monitoring
+
+# Written by the harness as each phase samples, read by the Alloy textfile
+# collector. A measurement in progress, not an input to anything. The
+# directory itself IS committed (via .gitkeep): Docker creates a missing
+# bind-mount source as root, and then the runner user cannot write the samples
+# into it. The write failure is swallowed, so the symptom is a dashboard that
+# is simply empty.
+/monitoring/textfile/*.prom
+/monitoring/textfile/*.tmp

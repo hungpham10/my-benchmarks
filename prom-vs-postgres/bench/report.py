@@ -258,6 +258,48 @@ def render_resource(ingest, query_res):
         add()
 
 
+def render_k6(k6_scenarios):
+    if not k6_scenarios:
+        return
+    add("## 4. Concurrency load (k6)")
+    add()
+    add("One scenario per cell: query shape x backend x VUS level, each its own "
+        "k6 run. p90/p95 come from the `query_duration_ms` Trend (k6 reports "
+        "those two by default). Raw time series of CPU/memory/disk per scenario "
+        "live in `results/k6_<scenario>_series.json`.")
+    add()
+    add("| Scenario | Exit | Wall (s) |")
+    add("| --- | --- | --- |")
+    for row in k6_scenarios:
+        add("| %s | %s | %.1f |" % (row["scenario"], row["exit_code"],
+                                    row["seconds"]))
+    add()
+    # p95 per scenario, from the k6 summary export when present.
+    rows = []
+    for row in k6_scenarios:
+        summary_path = os.path.join(RESULTS, "k6",
+                                    "summary_%s.json" % row["scenario"])
+        if not os.path.exists(summary_path):
+            continue
+        with open(summary_path) as fh:
+            summary = json.load(fh)
+        metric = summary.get("metrics", {}).get("query_duration_ms", {})
+        values = metric.get("values") or metric
+        rows.append((row["scenario"], values.get("p(90)"), values.get("p(95)")))
+    if rows:
+        # k6's summary export reports only p(90) and p(95) for a Trend -- there
+        # is no p(75) key to read, so the table shows the two it does have
+        # rather than a column of n/a that looks like a missing measurement.
+        add("| Scenario | p90 (ms) | p95 (ms) |")
+        add("| --- | --- | --- |")
+        for name, p90, p95 in rows:
+            add("| %s | %s | %s |" % (
+                name,
+                ("%.1f" % p90) if isinstance(p90, (int, float)) else "n/a",
+                ("%.1f" % p95) if isinstance(p95, (int, float)) else "n/a"))
+        add()
+
+
 def render_caveats():
     add("## Caveats to carry into the write-up")
     add()
@@ -304,6 +346,7 @@ def main():
     render_footprint(footprint)
     render_query(query)
     render_resource(ingest_res, query_res)
+    render_k6(load("k6_scenarios.json"))
     render_caveats()
 
     os.makedirs(RESULTS, exist_ok=True)

@@ -53,6 +53,23 @@ footprint: ## measure settled on-disk bytes, normalised per sample
 query: ## run the latency suite and sample CPU/memory while it runs
 	$(PY) bench/run.py query
 
+.PHONY: k6
+k6: ## run the k6 scenario matrix (query x backend x VUS)
+	$(PY) bench/run.py k6
+
+.PHONY: saturation
+saturation: ## drive both systems up together until throughput stops responding
+	$(PY) bench/run.py saturation
+
+.PHONY: dashboards
+dashboards: ## regenerate the comparison dashboard, local and Cloud copies
+	$(PY) monitoring/build_comparison_dashboard.py --write
+	$(PY) monitoring/sync_cloud_dashboard.py --write
+
+.PHONY: build-k6
+build-k6: ## build the k6 image (xk6-sql extension; needs network)
+	$(COMPOSE) --profile k6 build k6
+
 .PHONY: parity
 parity: ## confirm both targets hold the same data
 	$(PY) bench/run.py parity
