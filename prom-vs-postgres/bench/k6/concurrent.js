@@ -1,22 +1,22 @@
-/* Both systems under simultaneous load, in one k6 run.
+/* One run that walks the load upward, not one run per load level.
  *
- * Two scenarios share one wall clock, so Prometheus and PostgreSQL are
- * driven at exactly the same moment. Two separate k6 processes would drift
- * apart by however long it takes to start the second one, and the comparison
- * would be between different instants rather than between the two systems.
+ * The previous design started a separate k6 process for each VU level. That
+ * broke the metric it existed to produce: prom_requests and pg_requests are
+ * cumulative counters, a counter reset by a new process is indistinguishable
+ * from a restart, and Prometheus reads the reset as a spike. The recorded
+ * series went 331111 -> 199974 -> 402651, a counter going backwards, and rate()
+ * over that is not a throughput.
  *
- * Per-target metrics, not shared ones:
+ * One process makes the counters monotonic, so rate() is real, so a dashboard
+ * can show throughput against load against latency in one graph -- which is the
+ * only view where saturation is visible. The trade is honest and it costs
+ * something: the k6 summary no longer contains a p95 per VU level, because k6
+ * cannot attribute a sample to the stage that produced it. Per-stage numbers
+ * stay available by setting SATURATION_MODE=steps, which runs the old
+ * one-process-per-level sequence and is what the blog's exact figures come from.
  *
- *   prom_requests / pg_requests                Counter -> requests/s, i.e. TPS
- *   prom_query_duration_ms / pg_query_duration_ms   Trend -> latency
- *
- * k6 tags every metric with the scenario name, but the summary export
- * aggregates those tags away. Separate metric names are what make the two
- * systems readable side by side in results/ without querying anything.
- *
- * The VU level comes from the environment so that phase_saturation can walk
- * it upward and find the knee. Both scenarios always run at the SAME level:
- * comparing a saturated system against an idle one measures nothing.
+ * Both arms always ramp through the same stages, at the same moment: a
+ * saturated system next to an idle one measures nothing.
  *
  * queries.json is written by bench/run.py from bench/queries.py.
  */
@@ -34,8 +34,19 @@ const PG_DSN =
 const BACKEND = __ENV.BACKEND || "prometheus";
 const QUERY_NAME = __ENV.QUERY_NAME || "q1_counter_rate";
 const RUN_ID = __ENV.BENCH_RUN_ID || "";
-const VUS = parseInt(__ENV.CONCURRENT_VUS || "4", 10);
-const DURATION = __ENV.CONCURRENT_DURATION || "30s";
+
+// "1:30s" per rung. Ramp rather than one constant-VU run, so the point where
+// throughput stops answering to load sits inside the data instead of being
+// inferred from separate runs.
+const STAGES = (__ENV.SATURATION_STAGES ||
+                "1:30s,2:30s,4:30s,8:30s,16:30s,32:30s")
+  .split(",")
+  .map((chunk) => {
+    const [vus, duration] = chunk.split(":");
+    // `target`, not the older `targetVUs`: k6 v2 rejects the old name with
+// json: unknown field "targetVUs" at load time, before any iteration runs.
+  return { target: parseInt(vus, 10), duration: duration.trim() };
+  });
 
 const manifest = JSON.parse(open("/results/queries.json"));
 const query = manifest.queries.find((q) => q.name === QUERY_NAME);
@@ -45,13 +56,15 @@ if (!query) {
 
 // --- per-target metrics -----------------------------------------------------
 
-const promDuration = new Trend("prom_query_duration_ms", true);
-const pgDuration = new Trend("pg_query_duration_ms", true);
+// Cumulative counters, and monotonic because this is one process. That is what
+// makes rate() a throughput rather than an artefact.
 const promRequests = new Counter("prom_requests");
 const pgRequests = new Counter("pg_requests");
-// Failures are counted, not just logged. Under concurrency a Postgres query
-// can fail while still producing a latency figure, and a run of errors looks
-// exactly like a fast system on a throughput panel.
+const promDuration = new Trend("prom_query_duration_ms", true);
+const pgDuration = new Trend("pg_query_duration_ms", true);
+// Failures are counted, not just logged. Under concurrency a query can fail
+// and still contribute a latency figure, so a run of errors looks exactly
+// like a fast system on a throughput panel.
 const promFailed = new Counter("prom_failed");
 const pgFailed = new Counter("pg_failed");
 
@@ -62,19 +75,21 @@ const promQuery =
 
 export const options = {
   // Both arms always present, even when a query is meaningless for one of
-  // them, so the run's cost and shape do not change with the query.
+  // them, so the run's shape does not change with the query.
   scenarios: {
     prom: {
-      executor: "constant-vus",
-      vus: VUS,
-      duration: DURATION,
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: STAGES,
+      gracefulStop: "10s",
       exec: "prom",
       tags: { system: "prometheus", run_id: RUN_ID, query: QUERY_NAME },
     },
     pg: {
-      executor: "constant-vus",
-      vus: VUS,
-      duration: DURATION,
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: STAGES,
+      gracefulStop: "10s",
       exec: "pg",
       tags: { system: "postgres", run_id: RUN_ID, query: QUERY_NAME },
     },

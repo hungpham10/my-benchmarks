@@ -734,11 +734,6 @@ def phase_k6():
     return results
 
 
-def _k6_concurrent_env(push_url):
-    """The env a concurrent k6 run needs, with the same push rules as phase_k6."""
-    return dict(os.environ, K6_PROMETHEUS_RW_SERVER_URL=push_url)
-
-
 def _parse_k6_summary(relative_path):
     """Pull the per-target TPS and latency out of one k6 summary export.
 
@@ -777,6 +772,34 @@ def _parse_k6_summary(relative_path):
     }
 
 
+def _k6_concurrent_env(push_url):
+    """The env a concurrent k6 run needs, with the same push rules as phase_k6."""
+    return dict(os.environ, K6_PROMETHEUS_RW_SERVER_URL=push_url or "")
+
+
+def _cloud_push_url():
+    """Where k6 should push, preferring the stack that outlives the run.
+
+    Shared by phase_k6 and phase_saturation so the two phases cannot disagree
+    about the destination. One remote-write output is allowed, so the order
+    matters: Cloud when credentials exist, the local monitoring TSDB when it is
+    running, and nothing when neither. Empty is a real answer -- pushing into a
+    dead host turns a 30-second scenario into a 30-minute hang.
+    """
+    values = read_env_file("monitoring/.env.monitoring")
+    cloud = os.environ.get("K6_CLOUD_RW_URL") or values.get("K6_CLOUD_RW_URL") or ""
+    if cloud:
+        return cloud
+    url = values.get("GRAFANA_CLOUD_URL")
+    cid = values.get("GRAFANA_CLOUD_ID")
+    token = values.get("GRAFANA_CLOUD_TOKEN")
+    if url and cid and token:
+        return url.replace("https://", "https://%s:%s@" % (cid, token), 1)
+    if _container_running("bench-monitoring-prometheus"):
+        return "http://monitoring-prometheus:9090/api/v1/write"
+    return ""
+
+
 def phase_saturation():
     _reset_textfile()
     """Walk both systems up together until throughput stops responding to load.
@@ -801,64 +824,94 @@ def phase_saturation():
     are measuring the host, not the databases.
     """
     write_queries_manifest()
+    mode = os.environ.get("SATURATION_MODE", "ramp")
     steps = [int(v) for v in os.environ.get(
         "SATURATION_VUS", "1,2,4,8,16,32").split(",") if v.strip()]
-    duration = os.environ.get("SATURATION_DURATION", "30s")
-    queries = [q["name"] for q in Q.QUERIES
-               if q["name"] in os.environ.get("SATURATION_QUERIES", "").split(",")] \
-        or [Q.QUERIES[0]["name"]]
+    rung = os.environ.get("SATURATION_DURATION", "30s")
+    stage_spec = os.environ.get("SATURATION_STAGES", "") or ",".join(
+        "%d:%s" % (v, rung) for v in steps)
     backend = os.environ.get("SATURATION_PG_BACKEND", "metrics_norm_brin")
-    cloud_url = os.environ.get("K6_CLOUD_RW_URL") or ""
-    if not cloud_url:
-        values = read_env_file("monitoring/.env.monitoring")
-        url = values.get("GRAFANA_CLOUD_URL")
-        cid = values.get("GRAFANA_CLOUD_ID")
-        token = values.get("GRAFANA_CLOUD_TOKEN")
-        cloud_url = values.get("K6_CLOUD_RW_URL") or ""
-        if not cloud_url and url and cid and token:
-            cloud_url = url.replace("https://", "https://%s:%s@" % (cid, token), 1)
-    push_url = cloud_url or (
-        "http://monitoring-prometheus:9090/api/v1/write"
-        if _container_running("bench-monitoring-prometheus") else "")
+    push_url = _cloud_push_url()
     outs = ["--out", "experimental-prometheus-rw"] if push_url else []
+    if not push_url:
+        log("no push destination; k6 will run without remote-write output")
 
-    out_dir = os.path.join(RESULTS, "k6")
-    os.makedirs(out_dir, exist_ok=True)
-    results = []
-    for query_name in queries:
-        curve = []
-        for vus in steps:
-            label = "%s_vus%d" % (query_name, vus)
-            log("saturation %s" % label)
-            summary = os.path.join("/results", "k6", "saturation_%s.json" % label)
-            with ResourceWindow() as window:
-                env = _k6_concurrent_env(push_url)
-                env.update({
-                    "BACKEND": backend, "QUERY_NAME": query_name,
-                    "CONCURRENT_VUS": str(vus), "CONCURRENT_DURATION": duration,
-                    "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", ""),
-                    "BENCH_COMMIT": os.environ.get("BENCH_COMMIT", ""),
-                })
-                compose("--profile", "k6", "run", "--rm", "--no-deps", "k6",
-                        "run", "--summary-export", summary, *outs,
-                        "/scripts/concurrent.js", check=False, env=env)
-            entry = _parse_k6_summary(os.path.join("results", "k6",
-                                                   os.path.basename(summary)))
-            save_series("k6_saturation_%s_series.json" % label, window)
-            if entry:
-                entry.update({"query": query_name, "vus": vus,
-                              "wall_seconds": round(window.seconds, 2)})
-                curve.append(entry)
-                log("  prom %.0f req/s (p95 %s ms) | pg %.0f req/s (p95 %s ms)"
-                    % (entry["prometheus_tps"],
-                       entry["prometheus"]["p(95)"],
-                       entry["postgres_tps"],
-                       entry["postgres"]["p(95)"]))
-        results.append({"query": query_name, "backend": backend,
-                        "duration": duration, "curve": curve,
-                        "knee": _saturation_knee(curve)})
-    save("k6_saturation.json", results)
-    return results
+    if mode == "ramp":
+        # One process, both arms, load walked upward. The counters stay
+        # monotonic, so rate() on them is a throughput and the dashboard can
+        # draw saturation happening rather than a table of separate runs. The
+        # note at the top of concurrent.js records what this gives up.
+        entry = _run_saturation_once(backend, Q.QUERIES[0]["name"],
+                                     push_url, outs, stage_spec=stage_spec)
+        if not entry:
+            return []
+        payload = {"mode": "ramp", "query": Q.QUERIES[0]["name"],
+                   "backend": backend, "stages": stage_spec, "entry": entry}
+        save("k6_saturation.json", payload)
+        log("prometheus %.0f req/s (p95 %s ms) | postgres %.0f req/s (p95 %s ms)"
+            % (entry["prometheus_tps"], entry["prometheus"]["p(95)"],
+               entry["postgres_tps"], entry["postgres"]["p(95)"]))
+        return payload
+
+    # steps mode: one process per level. Gives up the live curve to counter
+    # resets and keeps an exact p95 per level, which is what the write-up
+    # quotes. Selected with SATURATION_MODE=steps.
+    curve = []
+    for vus in steps:
+        label = "%s_vus%d" % (Q.QUERIES[0]["name"], vus)
+        entry = _run_saturation_once(backend, Q.QUERIES[0]["name"], push_url,
+                                     outs, label,
+                                     stage_spec="%d:%s" % (vus, rung))
+        if entry:
+            entry["vus"] = vus
+            curve.append(entry)
+            log("  prom %.0f req/s (p95 %s ms) | pg %.0f req/s (p95 %s ms)"
+                % (entry["prometheus_tps"], entry["prometheus"]["p(95)"],
+                   entry["postgres_tps"], entry["postgres"]["p(95)"]))
+    payload = {"mode": "steps", "query": Q.QUERIES[0]["name"],
+               "backend": backend, "stages": stage_spec,
+               "curve": curve, "knee": _saturation_knee(curve)}
+    save("k6_saturation.json", payload)
+    return payload
+
+
+def _run_saturation_once(backend, query_name, push_url, outs, label=None,
+                         stage_spec=None):
+    """Run concurrent.js once and read its summary back into an entry."""
+    label = label or query_name
+    summary = os.path.join("/results", "k6", "saturation_%s.json" % label)
+    log("k6 concurrent run %s (stages %s)" % (label, stage_spec))
+    with ResourceWindow() as window:
+        env = _k6_concurrent_env(push_url)
+        env.update({
+            "BACKEND": backend, "QUERY_NAME": query_name,
+            "SATURATION_STAGES": stage_spec or "",
+            "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", ""),
+            "BENCH_COMMIT": os.environ.get("BENCH_COMMIT", ""),
+        })
+        # The script no longer reads CONCURRENT_VUS / CONCURRENT_DURATION: the
+        # stages carry the ramp, and inheriting a stale value would silently
+        # override it from a parent shell.
+        env.pop("CONCURRENT_VUS", None)
+        env.pop("CONCURRENT_DURATION", None)
+        result = compose("--profile", "k6", "run", "--rm", "--no-deps", "k6",
+                         "run", "--summary-export", summary, *outs,
+                         "/scripts/concurrent.js", check=False, env=env,
+                         capture_output=True)
+    output = (result.stdout or "") + (result.stderr or "")
+    if PUSH_FAILURE_MARKER in output and push_url:
+        log("  PUSH FAILED: k6 could not write to %s" % push_url)
+    save_series("k6_saturation_%s_series.json" % label, window)
+    entry = _parse_k6_summary(os.path.join(
+        "results", "k6", os.path.basename(summary)))
+    if not entry:
+        log("  no summary produced (exit %d)" % result.returncode)
+        return None
+    entry.update({"query": query_name, "backend": backend,
+                  "exit_code": result.returncode,
+                  "push_failed": PUSH_FAILURE_MARKER in output,
+                  "wall_seconds": round(window.seconds, 2)})
+    return entry
 
 
 def _saturation_knee(curve):
