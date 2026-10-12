@@ -210,6 +210,17 @@ class ResourceWindow:
 
 # --- phases ---------------------------------------------------------------
 
+def _container_running(container):
+    """True when the named container is up.
+
+    Used to decide whether k6 has a live remote-write target. A remote_write
+    output pointed at a dead host does not fail fast; it retries, so the
+    scenario appears to hang instead of reporting that nothing was pushed.
+    """
+    result = docker(["inspect", "--format", "{{.State.Running}}", container])
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def _image_digest(container):
     """Tag and image ID for a running container.
 
@@ -228,9 +239,14 @@ def _image_digest(container):
     return {"tag": parts[0], "id": parts[1]}
 
 
-def read_env_file():
+def read_env_file(name=".env"):
+    """Parse a simple KEY=VALUE file, ignoring comments and blank lines.
+
+    `name` is relative to the benchmark root: `.env` for the scale knobs,
+    `monitoring/.env.monitoring` for the Grafana Cloud credentials.
+    """
     values = {}
-    path = os.path.join(ROOT, ".env")
+    path = os.path.join(ROOT, name)
     if not os.path.exists(path):
         return values
     with open(path) as fh:
@@ -238,7 +254,14 @@ def read_env_file():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
-                values[key.strip()] = value.strip()
+                key, value = key.strip(), value.strip()
+                # Docker Compose accepts quoted values and the Grafana Cloud UI
+                # hands them out quoted. Strip them, or a derived URL keeps the
+                # quotes and the remote_write request fails with a URL that
+                # looks correct in the file and is not.
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                values[key] = value
     return values
 
 
@@ -509,27 +532,38 @@ def phase_k6():
     out_dir = os.path.join(RESULTS, "k6")
     os.makedirs(out_dir, exist_ok=True)
 
+    cloud_url = os.environ.get("K6_CLOUD_RW_URL")
     if not cloud_url:
         # Derive from the same Grafana Cloud credentials alloy uses, so there
         # is one place to fill in. K6_CLOUD_RW_URL overrides the derivation.
-        url = os.environ.get("GRAFANA_CLOUD_URL")
-        cid = os.environ.get("GRAFANA_CLOUD_ID")
-        token = os.environ.get("GRAFANA_CLOUD_TOKEN")
-        env_file = os.path.join(ROOT, "monitoring", ".env.monitoring")
-        values = {}
-        if os.path.exists(env_file):
-            for line in open(env_file):
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    values[k] = v
-                if line.startswith("K6_CLOUD_RW_URL="):
-                    cloud_url = line.split("=", 1)[1].strip()
-        url = url or values.get("GRAFANA_CLOUD_URL")
-        cid = cid or values.get("GRAFANA_CLOUD_ID")
-        token = token or values.get("GRAFANA_CLOUD_TOKEN")
+        values = read_env_file("monitoring/.env.monitoring")
+        url = os.environ.get("GRAFANA_CLOUD_URL") or values.get("GRAFANA_CLOUD_URL")
+        cid = os.environ.get("GRAFANA_CLOUD_ID") or values.get("GRAFANA_CLOUD_ID")
+        token = os.environ.get("GRAFANA_CLOUD_TOKEN") or values.get("GRAFANA_CLOUD_TOKEN")
+        cloud_url = values.get("K6_CLOUD_RW_URL")
         if not cloud_url and url and cid and token:
             cloud_url = url.replace("https://", "https://%s:%s@" % (cid, token), 1)
+
+    # k6's remote-write output takes the destination from
+    # K6_PROMETHEUS_RW_SERVER_URL and ignores a URL appended to the --out flag.
+    # It supports exactly one such output, so a run pushes to the local
+    # monitoring TSDB when one is up and to Grafana Cloud otherwise.
+    #
+    # Never leave the destination unset: with the output enabled and no env,
+    # k6 falls back to http://localhost:9090/api/v1/write -- which from the
+    # runner is the Prometheus UNDER TEST, the very TSDB whose bytes/sample
+    # this benchmark reports. Writing k6's own metrics into it would move that
+    # headline number. So: only enable the output when there is a real
+    # destination, and always set the env explicitly.
+    push_url = ""
+    if _container_running("bench-monitoring-prometheus"):
+        push_url = "http://monitoring-prometheus:9090/api/v1/write"
+    elif cloud_url:
+        push_url = cloud_url
+    else:
+        log("no monitoring TSDB and no Grafana Cloud credentials; "
+            "k6 will not push its metrics anywhere")
+    outs = ["--out", "experimental-prometheus-rw"] if push_url else []
 
     results = []
     for query in Q.QUERIES:
@@ -537,19 +571,16 @@ def phase_k6():
             for vus in vus_levels:
                 name = "%s_%s_vus%s" % (query["name"], backend, vus)
                 log("k6 scenario %s, %s" % (name, duration))
-                outs = ["--out", "experimental-prometheus-rw="
-                        "http://monitoring-prometheus:9090/api/v1/write"]
-                if cloud_url:
-                    outs += ["--out", "experimental-prometheus-rw=%s" % cloud_url]
                 args = (["run", "--vus", vus, "--duration", duration,
                          "--summary-export", os.path.join("/results", "k6",
                                                         "summary_%s.json" % name),
                          *outs, "/scripts/main.js"])
                 with ResourceWindow() as window:
                     env = dict(os.environ, K6_BACKEND=backend,
-                               K6_QUERY=query["name"])
-                    result = compose("--profile", "k6", "run", "--rm", "k6",
-                                     *args, check=False, env=env)
+                               K6_QUERY=query["name"],
+                               K6_PROMETHEUS_RW_SERVER_URL=push_url)
+                    result = compose("--profile", "k6", "run", "--rm", "--no-deps",
+                                     "k6", *args, check=False, env=env)
                 save_series("k6_%s_series.json" % name, window)
                 results.append({"scenario": name, "exit_code": result.returncode,
                                 "seconds": round(window.seconds, 2)})

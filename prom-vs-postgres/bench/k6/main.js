@@ -16,6 +16,11 @@
 
 import http from "k6/http";
 import sql from "k6/x/sql";
+// sql.open takes the driver's default export -- a Symbol, not a string.
+// Passing a string compiles, runs, and then fails with "unsupported
+// database: invalid driver parameter type", which blames the DSN and sends
+// you looking in the wrong place entirely.
+import postgres from "k6/x/sql/driver/postgres";
 import { check } from "k6";
 import { Trend } from "k6/metrics";
 
@@ -45,7 +50,7 @@ if (BACKEND === "prometheus") {
     `&start=${manifest.start_s}&end=${manifest.end_s}` +
     `&step=${manifest.step_seconds}`;
 } else {
-  conn = sql.open("postgres", PG_DSN);
+  conn = sql.open(postgres, PG_DSN);
 }
 
 export default function () {
@@ -56,7 +61,7 @@ export default function () {
     ok = res.status === 200;
   } else {
     try {
-      sql.query(conn, query.sql[BACKEND]);
+      conn.query(query.sql[BACKEND]);
     } catch (e) {
       ok = false;
       console.error(e);
