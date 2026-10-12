@@ -453,12 +453,12 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "title": "On disk",
-      "description": "du of each system's own data directory, sampled through the run. This is the number the bytes-per-sample figure is computed from. Not cAdvisor's container_fs_usage_bytes: under Colima it carries no container label and reports the host filesystem for every series, so a panel over it draws one 25GB line for both systems and looks entirely plausible.",
+      "title": "On disk, stored data only (WAL excluded)",
+      "description": "This is the figure the bytes-per-sample headline in results/report.md is computed from, so the panel and the report cannot disagree. WAL is excluded on both sides: it is transient replay state, not data that is being kept. Comparing Prometheus post-WAL against PostgreSQL including-WAL reads 49x on the recorded run where the report says 59.9x. Not cAdvisor's container_fs_usage_bytes: under Colima it carries no container label and reports the host filesystem for every series, so a panel over it draws one 25GB line for both systems.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 31
       },
@@ -493,13 +493,69 @@
       },
       "targets": [
         {
-          "expr": "bench_disk_bytes{system=\"prometheus\"}",
+          "expr": "bench_disk_stored_bytes{system=\"prometheus\"}",
           "legendFormat": "Prometheus",
           "refId": "A"
         },
         {
-          "expr": "bench_disk_bytes{system=\"postgres\"}",
+          "expr": "bench_disk_stored_bytes{system=\"postgres\"}",
           "legendFormat": "PostgreSQL",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "title": "On disk, including WAL",
+      "description": "The whole data directory, so the difference from the panel on the left is the write-ahead log. PostgreSQL's is several times the size of its stored data, which is worth seeing next to it rather than folded into a single number.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "none"
+            },
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "bench_disk_bytes{system=\"prometheus\"}",
+          "legendFormat": "Prometheus (incl. WAL)",
+          "refId": "A"
+        },
+        {
+          "expr": "bench_disk_bytes{system=\"postgres\"}",
+          "legendFormat": "PostgreSQL (incl. WAL)",
           "refId": "B"
         }
       ]
