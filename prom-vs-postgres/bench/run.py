@@ -175,6 +175,13 @@ class ResourceWindow:
         # series, which is what makes a CPU/memory/disk curve plottable later.
         disk_every = 3  # du is the expensive call; ~6s at INTERVAL=2
         count = 0
+        # du runs every third sample but the textfile is rewritten every time,
+        # so the disk lines have to be carried forward. Replacing the file with
+        # only what this tick measured makes bench_disk_bytes vanish on two
+        # ticks out of three, and a series that disappears from a textfile is
+        # stale, not zero -- the disk panel goes blank for as long as the phase
+        # runs.
+        last_disk = {"prom_disk_bytes": None, "pg_disk_bytes": None}
         while not self._stop.is_set():
             got = sample_stats()
             if got:
@@ -185,6 +192,10 @@ class ResourceWindow:
                     entry["prom_disk_bytes"] = _du("bench-prometheus", "/prometheus")
                     entry["pg_disk_bytes"] = _du(
                         "bench-postgres", _pg_data_dir())
+                    for key in last_disk:
+                        last_disk[key] = entry[key]
+                else:
+                    entry.update(last_disk)
                 self.series.append(entry)
                 _write_textfile(entry)
             count += 1
@@ -223,6 +234,9 @@ def _reset_textfile():
 # Where the textfile collector reads from. Alloy mounts this directory and
 # scrapes it, which is how the numbers written below reach a dashboard.
 TEXTFILE_DIR = os.path.join(ROOT, "monitoring", "textfile")
+
+# Last write failure, reported once rather than on every 2-second sample.
+_TEXTFILE_ERROR = None
 
 
 def _write_textfile(entry):
@@ -270,9 +284,18 @@ def _write_textfile(entry):
         with open(tmp, "w") as fh:
             fh.write("\n".join(lines) + "\n")
         os.replace(tmp, os.path.join(TEXTFILE_DIR, "bench.prom"))
-    except OSError:
-        # The dashboard is a convenience; losing it must never abort a phase.
-        pass
+    except OSError as exc:
+        # Report it once. The dashboard is a convenience and must never abort a
+        # phase, but swallowing the error made this undiagnosable: on CI the
+        # directory did not exist in git, Docker created the bind mount owned
+        # by root, every write failed, and the panels were simply empty with
+        # nothing in the log. One line here is the difference between a silent
+        # blank panel and a fixable one.
+        global _TEXTFILE_ERROR
+        if _TEXTFILE_ERROR != str(exc):
+            _TEXTFILE_ERROR = str(exc)
+            log("WARNING: cannot write monitoring/textfile (%s); the dashboard "
+                "will have no CPU/memory/disk curves" % exc)
 
 
 # k6's own wording when a remote-write POST fails. Matched against the run's

@@ -1,0 +1,7 @@
+# This directory is bind-mounted into Alloy and read by its textfile collector.
+#
+# It has to exist in git. Docker creates a missing bind-mount source owned by
+# root, and the benchmark then cannot write its samples into it as the runner
+# user -- the write is swallowed, and the dashboard is empty for no visible
+# reason. Keeping the directory here means git creates it with the right
+# ownership on every checkout, on the runner as well as on a laptop.
