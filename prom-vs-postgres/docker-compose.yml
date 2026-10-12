@@ -143,6 +143,14 @@ services:
       QUERY_NAME: "${K6_QUERY:-q1_counter_rate}"
       BENCH_RUN_ID: ${BENCH_RUN_ID:-}
       BENCH_COMMIT: ${BENCH_COMMIT:-}
+      # k6's remote-write output reads the destination from this variable and
+      # ignores a URL attached to --out. It must be declared here: an env var
+      # set on the `docker compose run` command line is not visible to the
+      # container unless the service declares it, so without this line k6
+      # silently falls back to http://localhost:9090/api/v1/write and POSTs
+      # its metrics at whatever listens there -- which is the Prometheus under
+      # test on a local run.
+      K6_PROMETHEUS_RW_SERVER_URL: "${K6_PROMETHEUS_RW_SERVER_URL:-}"
     volumes:
       - ./results:/results
       - ./bench/k6:/scripts:ro
