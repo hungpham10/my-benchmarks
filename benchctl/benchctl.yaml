@@ -1,0 +1,16 @@
+# benchctl — small benchmark framework.
+# The envelope is the measurement: every module gets the same budget.
+envelope:
+  cpus: "1"
+  memory: 4G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# Grafana Cloud: every metric from every module carries module + run_id.
+# The framework never merges numbers itself; Cloud holds the curves.
+cloud:
+  remote_write_url: "${GRAFANA_CLOUD_RW_URL:-}"
+  username: "${GRAFANA_CLOUD_RW_USER:-}"
+
+run:
+  run_id: "${BENCH_RUN_ID:-local}"

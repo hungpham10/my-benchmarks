@@ -1,0 +1,5 @@
+FROM grafana/k6:latest
+# Static runner image: the framework never generates Dockerfiles.
+# Module k6 needs (e.g. xk6-sql for postgres) are declared in the module
+# and built here per module in a later step; prometheus needs plain k6.
+WORKDIR /scripts

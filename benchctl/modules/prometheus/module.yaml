@@ -1,0 +1,35 @@
+# Module contract (5 functions; no module registers without all 5):
+#   deploy()    -> containers up, healthy, endpoint returned
+#   init()      -> load data for (scale, shape), return {samples, bytes_on_disk}
+#   start_load()-> open write path, return write handle
+#   stop_load() -> flush + close, MUST guarantee durable before returning
+#   teardown()  -> volumes removed
+#
+# What the module owns: image, flags, healthcheck, init data, ONE k6 step.
+# What the framework owns: envelope, stages, thresholds, plan.json, compose.
+
+name: prometheus
+image: prom/prometheus:latest
+
+deploy:
+  command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    - --storage.tsdb.path=/prometheus
+    - --web.enable-remote-write-receiver
+    - --web.enable-lifecycle
+    - --query.max-samples=50000000
+  config: prometheus.yml
+  healthcheck: "wget -qO- http://localhost:9090/-/ready"
+  ports:
+    http: 9090
+
+# Remote-write ingest window. Prometheus refuses samples older than
+# MaxTime - chunkRange/2 (~1h) and more than 10m ahead of wall clock,
+# so the dataset is future-dated inside [now-50m, now+10m].
+ingest:
+  path: /api/v1/write
+  ahead_minutes: 8
+
+query:
+  path: /api/v1/query
+  step_file: step.js
