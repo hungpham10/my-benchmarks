@@ -42,12 +42,12 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "title": "Envelope in force",
-      "description": "Both systems are capped identically (TARGET_CPUS / TARGET_MEMORY in compose), so a gap here is a difference in the storage format rather than in how much machine each one was given.",
+      "title": "Queries executed, per server (Prometheus)",
+      "description": "prometheus_http_requests_total filtered to the read API. Filtered by handler rather than summed, because the same endpoint also serves remote-write and health checks, which would otherwise appear as benchmark load. This is the count the Prometheus under test reports about itself, not what k6 thinks it sent.",
       "type": "timeseries",
       "gridPos": {
         "h": 4,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 1
       },
@@ -82,14 +82,60 @@
       },
       "targets": [
         {
-          "expr": "count(bench_cpu_pct{system=\"prometheus\"})",
-          "legendFormat": "prometheus series",
+          "expr": "sum(rate(prometheus_http_requests_total{job=\"prometheus-under-test\",handler=~\"/api/v1/(query|query_range)\"{run_id=~\"$run_id\"}[1m]))",
+          "legendFormat": "queries/s",
           "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "title": "Statements executed, per server (PostgreSQL)",
+      "description": "pg_stat_statements_calls_total, summed over every queryid. Per statement counts live in the same metric, split by queryid, if you want to see individual shapes. Counts everything the server ran, so during the ingest phase it includes the COPY traffic and is not a comparison of query throughput.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "none"
+            },
+            "showPoints": "never"
+          }
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
         {
-          "expr": "count(bench_cpu_pct{system=\"postgres\"})",
-          "legendFormat": "postgres series",
-          "refId": "B"
+          "expr": "sum(rate(pg_stat_statements_calls_total{job=\"postgres-under-test\",datname=\"bench\",run_id=~\"$run_id\"}[1m]))",
+          "legendFormat": "statements/s",
+          "refId": "A"
         }
       ]
     },
@@ -342,7 +388,7 @@
         "uid": "${DS_PROMETHEUS}"
       },
       "title": "CPU",
-      "description": "docker stats, sampled every 2s by the harness. Not cAdvisor: under Colima its per-container CPU is documented as untrustworthy, and this is the same source as the headline figures in results/report.md.",
+      "description": "docker stats, sampled every 2s by the harness. Not cAdvisor: under Colima its per-container CPU is documented as untrustworthy, and this is the same source as the headline figures in results/report.md.\n\nBoth systems are capped identically (TARGET_CPUS / TARGET_MEMORY in compose), so a gap here is a difference in the storage format rather than in how much machine each one was given.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,

@@ -83,11 +83,36 @@ def build():
     panels = []
 
     panels.append(row(TITLE, y)); y += 1
+    # Server-side, not client-side. The k6 counters below measure what the
+    # load generator sent; these measure what each server actually did. The
+    # two should agree, and a disagreement is a finding -- a request counted
+    # by k6 but never executed means a retry, a timeout, or a rejected query.
+    #
+    # They also survive the problems the client counters had: these are
+    # ordinary scraped metrics with no flush interval to get wrong, so there is
+    # no way to end up with a single point as happened with
+    # K6_PROMETHEUS_RW_FLUSH_INTERVAL unset.
     panels.append(panel(
-        "Envelope in force", ENVELOPE,
-        [('count(bench_cpu_pct{system="prometheus"})', "prometheus series"),
-         ('count(bench_cpu_pct{system="postgres"})', "postgres series")],
-        0, y, w=24, h=4))
+        "Queries executed, per server (Prometheus)",
+        "prometheus_http_requests_total filtered to the read API. Filtered by "
+        "handler rather than summed, because the same endpoint also serves "
+        "remote-write and health checks, which would otherwise appear as "
+        "benchmark load. This is the count the Prometheus under test reports "
+        "about itself, not what k6 thinks it sent.",
+        [('sum(rate(prometheus_http_requests_total{job="prometheus-under-test",'
+          'handler=~"/api/v1/(query|query_range)"'
+          '{run_id=~"$run_id"}[1m]))', "queries/s")],
+        0, y, w=12, h=4))
+    panels.append(panel(
+        "Statements executed, per server (PostgreSQL)",
+        "pg_stat_statements_calls_total, summed over every queryid. Per "
+        "statement counts live in the same metric, split by queryid, if you "
+        "want to see individual shapes. Counts everything the server ran, so "
+        "during the ingest phase it includes the COPY traffic and is not a "
+        "comparison of query throughput.",
+        [('sum(rate(pg_stat_statements_calls_total{job="postgres-under-test",'
+          'datname="bench",run_id=~"$run_id"}[1m]))', "statements/s")],
+        12, y, w=12, h=4))
 
     y += 4
     panels.append(row("Throughput — both systems under the same load", y)); y += 1
@@ -132,7 +157,10 @@ def build():
         "CPU",
         "docker stats, sampled every 2s by the harness. Not cAdvisor: under "
         "Colima its per-container CPU is documented as untrustworthy, and this "
-        "is the same source as the headline figures in results/report.md.",
+        "is the same source as the headline figures in results/report.md.\n\n"
+        "Both systems are capped identically (TARGET_CPUS / TARGET_MEMORY in "
+        "compose), so a gap here is a difference in the storage format rather "
+        "than in how much machine each one was given.",
         [('bench_cpu_pct{system="prometheus"}', "Prometheus"),
          ('bench_cpu_pct{system="postgres"}', "PostgreSQL")],
         0, y, unit="percent"))
