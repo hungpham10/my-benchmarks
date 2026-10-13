@@ -48,25 +48,29 @@ PG_DSN = (
 SAMPLE_TABLES = ("metrics_jsonb", "metrics_norm_brin")
 
 
-def prune_other_schemas(cur, keep):
-    """Drop the sample tables this leg is not measuring.
+def prune_other_schemas(cur, schemas):
+    """Drop what this run does not measure, leaving only what it does.
 
     The init script creates both schemas' tables, so a leg that loads only
     jsonb still carries an empty metrics_norm_brin with its indexes -- 57KB
     measured on a smoke run. That is nothing at full scale, but it is a
     confound in principle, and this removes it rather than arguing it away.
 
-    series_dim belongs to the normalised design, so it is loaded with that
-    leg and dropped otherwise: each leg then pays for its own metadata.
+    series_dim is decided across the whole run, not per schema: it belongs to
+    the normalised design, so it is kept when norm is among the schemas being
+    loaded and dropped only when none of them needs it. Deciding it from the
+    first schema alone drops the table and then fails on the next one, which is
+    how the default `--schemas jsonb,norm` was broken.
     """
+    keep_tables = {SCHEMAS[name]["table"] for name in schemas}
     for table in SAMPLE_TABLES:
-        if table == SCHEMAS[keep]["table"]:
+        if table in keep_tables:
             continue
         cur.execute("DROP TABLE IF EXISTS %s CASCADE" % table)
         log("pruned %s (not part of this leg)" % table)
-    if not SCHEMAS[keep]["needs_dim"]:
+    if not any(SCHEMAS[name]["needs_dim"] for name in schemas):
         cur.execute("DROP TABLE IF EXISTS series_dim CASCADE")
-        log("pruned series_dim (belongs to the norm design)")
+        log("pruned series_dim (no schema here needs it)")
 
 
 def log(message):
@@ -145,13 +149,14 @@ def ingest_prometheus(series, t_start_ms):
 # PostgreSQL, via binary COPY
 # ---------------------------------------------------------------------------
 
-def ensure_partitions(cur, t_start_ms, t_end_ms):
+def ensure_partitions(cur, t_start_ms, t_end_ms, schemas=None):
     """Create the daily partitions the future-dated window lands in."""
     first_day = int(t_start_ms) // 1000 // 86400
     last_day = int(t_end_ms) // 1000 // 86400
+    tables = [SCHEMAS[s]["table"] for s in schemas] if schemas else list(SAMPLE_TABLES)
     for day_index in range(last_day - first_day + 1):
         day = _iso((first_day + day_index) * 86400)
-        for table in SAMPLE_TABLES:
+        for table in tables:
             cur.execute(
                 "SELECT bench_ensure_partitions(%s::regclass, %s::date)", (table, day)
             )
@@ -244,22 +249,15 @@ def ingest_postgres(series, t_start_ms, schemas):
     results = []
     with psycopg.connect(PG_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
+            prune_other_schemas(cur, schemas)
             log("ensuring partitions")
-            ensure_partitions(cur, t_start_ms, d.t_end_ms(t_start_ms))
+            ensure_partitions(cur, t_start_ms, d.t_end_ms(t_start_ms), schemas)
 
             series_ids = None
-            prune_other_schemas(cur, schemas[0])
             if any(SCHEMAS[s]["needs_dim"] for s in schemas):
                 log("populating series_dim")
                 with conn.transaction():
                     series_ids = populate_series_dim(cur, series)
-            for schema in schemas:
-                spec = SCHEMAS[schema]
-                log("loading %s" % spec["table"])
-                started = time.monotonic()
-                with conn.transaction():
-                    load_schema(cur, series, series_ids, timestamps, schema)
-
             for schema in schemas:
                 spec = SCHEMAS[schema]
                 log("loading %s" % spec["table"])
