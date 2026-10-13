@@ -11,6 +11,7 @@ envelope:
 cloud:
   remote_write_url: "${GRAFANA_CLOUD_RW_URL:-}"
   username: "${GRAFANA_CLOUD_RW_USER:-}"
+  password: "${GRAFANA_CLOUD_RW_PASS:-}"
 
 run:
   run_id: "${BENCH_RUN_ID:-local}"

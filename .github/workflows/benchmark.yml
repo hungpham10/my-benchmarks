@@ -108,6 +108,8 @@ jobs:
         # deliberately skipped push, so the verify output records which it was.
         env:
           GRAFANA_CLOUD_RW_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
+          GRAFANA_CLOUD_RW_USER: ${{ secrets.GRAFANA_CLOUD_ID }}
+          GRAFANA_CLOUD_RW_PASS: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
         run: |
           rm -rf results plan.json docker-compose.gen.yml compose.gen.json
           mkdir -p results

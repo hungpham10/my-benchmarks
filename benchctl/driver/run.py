@@ -91,6 +91,8 @@ def gen_compose(module, cfg, mod_cfg):
                 "environment": {
                     "PROM_URL": "http://sut:9090",
                     "K6_PROMETHEUS_RW_SERVER_URL": cfg["cloud"]["remote_write_url"],
+                    "K6_PROMETHEUS_RW_USERNAME": cfg["cloud"]["username"],
+                    "K6_PROMETHEUS_RW_PASSWORD": cfg["cloud"]["password"],
                 },
                 "volumes": ["./results:/results", "./load:/scripts:ro",
                             "./plan.json:/plan.json:ro",
@@ -179,6 +181,12 @@ def main():
               f"({disk / init_res['samples']:.2f} B/sample)", flush=True)
 
         print("[benchctl] k6 ramp", flush=True)
+        # The k6 image runs as its own uid, which is not the runner's uid on
+        # Linux (Docker Desktop on macOS masks this). Without world-writable
+        # results/, handleSummary dies with permission denied and verify
+        # fails on a run that otherwise measured correctly — which is exactly
+        # what happened the first time this ran on CI.
+        os.chmod(RESULTS, 0o777)
         r = sh("docker", "compose", "-f", "docker-compose.gen.yml",
                "--profile", "k6", "run", "--rm", "k6",
                "run", "--out", "experimental-prometheus-rw",
