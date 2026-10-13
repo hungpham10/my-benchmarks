@@ -45,7 +45,28 @@ PG_DSN = (
     )
 )
 
-SCHEMAS = ("metrics_jsonb", "metrics_norm_brin")
+SAMPLE_TABLES = ("metrics_jsonb", "metrics_norm_brin")
+
+
+def prune_other_schemas(cur, keep):
+    """Drop the sample tables this leg is not measuring.
+
+    The init script creates both schemas' tables, so a leg that loads only
+    jsonb still carries an empty metrics_norm_brin with its indexes -- 57KB
+    measured on a smoke run. That is nothing at full scale, but it is a
+    confound in principle, and this removes it rather than arguing it away.
+
+    series_dim belongs to the normalised design, so it is loaded with that
+    leg and dropped otherwise: each leg then pays for its own metadata.
+    """
+    for table in SAMPLE_TABLES:
+        if table == SCHEMAS[keep]["table"]:
+            continue
+        cur.execute("DROP TABLE IF EXISTS %s CASCADE" % table)
+        log("pruned %s (not part of this leg)" % table)
+    if not SCHEMAS[keep]["needs_dim"]:
+        cur.execute("DROP TABLE IF EXISTS series_dim CASCADE")
+        log("pruned series_dim (belongs to the norm design)")
 
 
 def log(message):
@@ -130,7 +151,7 @@ def ensure_partitions(cur, t_start_ms, t_end_ms):
     last_day = int(t_end_ms) // 1000 // 86400
     for day_index in range(last_day - first_day + 1):
         day = _iso((first_day + day_index) * 86400)
-        for table in SCHEMAS:
+        for table in SAMPLE_TABLES:
             cur.execute(
                 "SELECT bench_ensure_partitions(%s::regclass, %s::date)", (table, day)
             )
@@ -187,7 +208,38 @@ def load_schema_norm(cur, series, series_ids, timestamps):
         log("  metrics_norm_brin %d/%d series" % (chunk_start + len(chunk), len(series)))
 
 
-def ingest_postgres(series, t_start_ms):
+SCHEMAS = {
+    "jsonb": {
+        "table": "metrics_jsonb",
+        "needs_dim": False,
+    },
+    "norm": {
+        "table": "metrics_norm_brin",
+        # series_dim belongs to the normalised design: the sample tables key on
+        # its id rather than repeating labels. It is loaded with this schema so
+        # that disk measured for the "norm" leg includes it.
+        "needs_dim": True,
+    },
+}
+
+
+def load_schema(cur, series, series_ids, timestamps, schema):
+    """Load one schema's sample table, and series_dim when it owns one."""
+    if schema == "jsonb":
+        load_schema_jsonb(cur, series, timestamps)
+    else:
+        load_schema_norm(cur, series, series_ids, timestamps)
+
+
+def ingest_postgres(series, t_start_ms, schemas):
+    """Load `schemas` into an otherwise empty database.
+
+    Loaded one schema per leg, never both into the same instance. Both in the
+    same database makes disk unattributable: metrics_jsonb and metrics_norm_brin
+    plus a shared series_dim arrive together, so a measurement for either leg
+    is really a measurement of both. It also breaks the memory comparison, since
+    shared_buffers stays warm from the first leg into the second.
+    """
     timestamps = v.generate_timestamps(t_start_ms)
     results = []
     with psycopg.connect(PG_DSN, autocommit=True) as conn:
@@ -195,26 +247,31 @@ def ingest_postgres(series, t_start_ms):
             log("ensuring partitions")
             ensure_partitions(cur, t_start_ms, d.t_end_ms(t_start_ms))
 
-            log("populating series_dim")
-            with conn.transaction():
-                series_ids = populate_series_dim(cur, series)
-
-            for name, loader in (
-                ("metrics_jsonb", lambda cu: load_schema_jsonb(cu, series, timestamps)),
-                (
-                    "metrics_norm_brin",
-                    lambda cu: load_schema_norm(cu, series, series_ids, timestamps),
-                ),
-            ):
-                log("loading %s" % name)
+            series_ids = None
+            prune_other_schemas(cur, schemas[0])
+            if any(SCHEMAS[s]["needs_dim"] for s in schemas):
+                log("populating series_dim")
+                with conn.transaction():
+                    series_ids = populate_series_dim(cur, series)
+            for schema in schemas:
+                spec = SCHEMAS[schema]
+                log("loading %s" % spec["table"])
                 started = time.monotonic()
                 with conn.transaction():
-                    loader(cur)
+                    load_schema(cur, series, series_ids, timestamps, schema)
+
+            for schema in schemas:
+                spec = SCHEMAS[schema]
+                log("loading %s" % spec["table"])
+                started = time.monotonic()
+                with conn.transaction():
+                    load_schema(cur, series, series_ids, timestamps, schema)
                 elapsed = time.monotonic() - started
                 total = len(series) * d.SAMPLES
                 results.append(
                     {
-                        "target": name,
+                        "target": schema,
+                        "table": spec["table"],
                         "samples": total,
                         "seconds": round(elapsed, 3),
                         "samples_per_second": round(total / elapsed, 1),
@@ -222,7 +279,7 @@ def ingest_postgres(series, t_start_ms):
                 )
                 log(
                     "  %s: %d rows in %.1fs (%.0f rows/s)"
-                    % (name, total, elapsed, total / elapsed)
+                    % (spec["table"], total, elapsed, total / elapsed)
                 )
     return results
 
@@ -314,7 +371,18 @@ def write_manifest(series, t_start_ms, targets):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default=os.environ.get("TARGETS", "all"))
+    # Which PostgreSQL schema to load. One per leg: both into the same instance
+    # makes disk and memory unattributable to either leg.
+    parser.add_argument("--schemas",
+                        default=os.environ.get("PG_SCHEMAS", "jsonb,norm"),
+                        help="comma-separated subset of: jsonb, norm")
     args = parser.parse_args()
+
+    schemas = [s.strip() for s in args.schemas.split(",") if s.strip()]
+    unknown = [s for s in schemas if s not in SCHEMAS]
+    if unknown:
+        parser.error("unknown schema(s): %s (known: %s)"
+                     % (", ".join(unknown), ", ".join(SCHEMAS)))
 
     series = d.build_series()
     t_start_ms, reused = resolve_start_ms()
@@ -330,7 +398,7 @@ def main():
     if args.target in ("prometheus", "all"):
         summary.append(ingest_prometheus(series, t_start_ms))
     if args.target in ("postgres", "all"):
-        summary.extend(ingest_postgres(series, t_start_ms))
+        summary.extend(ingest_postgres(series, t_start_ms, schemas))
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(os.path.join(RESULTS_DIR, "ingest.json"), "w") as fh:
