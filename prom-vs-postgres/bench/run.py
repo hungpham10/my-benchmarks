@@ -421,12 +421,19 @@ def phase_ingest():
     manifest = load("dataset.json") or {}
     per_target = []
     resource = {}
+    # One schema per leg, so the database contains only what this leg
+    # measures. See prune_other_schemas in generator/generate.py for why both
+    # in one instance makes the numbers unattributable.
+    schemas = os.environ.get("PG_SCHEMAS", "jsonb,norm")
     for target in ("prometheus", "postgres"):
         log("ingesting into %s (nothing else running)" % target)
+        args = ["python", "/work/generator/generate.py"]
+        if target == "postgres":
+            args += ["--schemas", schemas]
         with ResourceWindow() as window:
-            env = dict(os.environ, INGEST_TARGETS=target)
+            env = dict(os.environ, INGEST_TARGETS=target, PG_SCHEMAS=schemas)
             compose("--profile", "ingest", "run", "--rm", "bench",
-                    "python", "/work/generator/generate.py", check=True, env=env)
+                    *args, check=True, env=env)
         per_target = load("ingest.json") or []
         resource[target] = {"seconds": round(window.seconds, 2), **window.peak}
         log("  %s done in %.1fs" % (target, window.seconds))
@@ -436,7 +443,7 @@ def phase_ingest():
             % (manifest.get("t_start_ms"), manifest.get("t_end_ms"),
                manifest.get("total_samples")))
     save("resource_ingest.json", resource)
-    return {"per_target": per_target}
+    return {"per_target": per_target, "schemas": schemas}
 
 
 def _du(container, path):
