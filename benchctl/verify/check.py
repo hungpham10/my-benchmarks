@@ -54,56 +54,31 @@ def check_envelope():
 
 
 def check_server_requests():
-    """Client count (k6 http_reqs) vs server count (monitoring Prometheus).
+    """Client count (k6 http_reqs) vs server count (module's own counter).
 
-    The server count comes from the monitoring stack, which scrapes the SUT
-    externally — never from the SUT's own query API. The SUT does not scrape
-    itself (scrape_configs is empty by design, so self-scrape series would
-    corrupt the measured TSDB), so its own /api/v1/query cannot see
-    prometheus_http_requests_total at all. Asking the SUT about itself
-    returns 0 for every handler, which is how a whole debugging session was
-    spent chasing a scrape problem that did not exist.
-
-    max_over_time, not an instant query: verify runs after the SUT is down,
-    and an instant query on a series that went stale returns nothing.
+    The server count is read by the driver straight from the module before
+    and after the k6 leg and stored in disk-<module>.json as the delta — not
+    via Alloy, deliberately. Alloy scrapes every 10s and its last scrape can
+    lag the leg end, so a monitoring scrape is the wrong source for an exact
+    count. Alloy keeps the curves for Cloud; the exact number comes from the
+    server itself. A gap means requests died on the wire that k6 never saw,
+    and the latency curve is missing its worst points.
     """
-    import urllib.request
-    import urllib.parse
-    import yaml
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    scen = os.environ.get("BENCHCTL_SCENARIO", "")
-    if scen and os.path.exists(os.path.join(root, scen)):
-        modules = yaml.safe_load(open(os.path.join(root, scen)))["systems"]
-    else:
-        modules = [f[len("disk-"):-len(".json")] for f in os.listdir(RESULTS)
-                   if f.startswith("disk-")]
     summary = json.load(open(os.path.join(RESULTS, "summary.json")))
     client = summary["metrics"]["http_reqs"]["values"]["count"]
-    mon = "http://localhost:19091"
+    files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
+    if not files:
+        return False, "no disk results holding a server count"
     worst = []
-    for module in modules:
-        mod = yaml.safe_load(
-            open(os.path.join(root, "modules", module, "module.yaml")))
-        mon_cfg = mod.get("monitoring", {})
-        metric = mon_cfg.get("server_requests_metric")
-        if not metric:
-            return False, f"{module}: no server_requests_metric declared"
-        match = ",".join(f'{k}="{v}"'
-                         for k, v in mon_cfg.get(
-                             "server_requests_match", {}).items())
-        q = f"max_over_time({metric}{{{match}}}[30m])"
-        url = mon + "/api/v1/query?query=" + urllib.parse.quote(q, safe="")
-        try:
-            with urllib.request.urlopen(url, timeout=30) as r:
-                data = json.load(r)
-        except Exception as e:  # noqa: BLE001 — monitoring may be down already
-            return False, f"monitoring query failed: {e}"
-        res = data["data"]["result"]
-        server = int(float(res[0]["value"][1])) if res else 0
+    for f in files:
+        disk = json.load(open(os.path.join(RESULTS, f)))
+        server = disk.get("server_requests")
+        if server is None:
+            return False, f"{f}: driver never recorded server_requests"
         gap = client - server
         tol = max(50, int(client * 0.05))
         status = "ok" if 0 <= gap <= tol else "GAP"
-        worst.append(f"{module}: client={client} server={server} "
+        worst.append(f"{disk['module']}: client={client} server={server} "
                      f"gap={gap} [{status}]")
         if status != "ok":
             return False, "; ".join(worst)

@@ -5,7 +5,8 @@
 #   stop_load() -> flush + close, MUST guarantee durable before returning
 #   teardown()  -> volumes removed
 #
-# What the module owns: image, flags, healthcheck, init data, ONE k6 step.
+# What the module owns: image, flags, healthcheck, init data, ONE k6 step,
+# and how to count what its server handled (requests.py).
 # What the framework owns: envelope, stages, thresholds, plan.json, compose.
 
 name: prometheus
@@ -18,10 +19,21 @@ deploy:
     - --web.enable-remote-write-receiver
     - --web.enable-lifecycle
     - --query.max-samples=50000000
-  config: prometheus.yml
-  healthcheck: "wget -qO- http://localhost:9090/-/ready"
+  config_files:
+    - src: prometheus.yml
+      dst: /etc/prometheus/prometheus.yml
+  data_volume: { name: sut-data, dst: /prometheus }
   ports:
-    http: 9090
+    # Default avoids 9090: a prom-vs-postgres stack may be running.
+    - { env: SUT_PORT, default: "19090", container: 9090 }
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  # Host-side base init.py/requests.py talk to. {VAR} resolves from env.
+  endpoint: "http://localhost:{SUT_PORT}"
+  disk_path: /prometheus
 
 # Remote-write ingest window. Prometheus refuses samples older than
 # MaxTime - chunkRange/2 (~1h) and more than 10m ahead of wall clock,
@@ -30,18 +42,12 @@ ingest:
   path: /api/v1/write
   ahead_minutes: 8
 
-query:
-  path: /api/v1/query
-  step_file: step.js
+k6:
+  image: grafana/k6:latest
+  env:
+    PROM_URL: "http://sut:9090"
 
-# Server-side request accounting: what the SERVER says it handled.
-# k6 counts at the client (http_reqs); this counts at the server. The two
-# must agree within tolerance — a gap means requests died on the wire that
-# k6 never saw, and the latency curve is missing its worst points.
-monitoring:
-  exporters: []   # prometheus exposes /metrics itself; nothing to add
-  server_requests_metric: prometheus_http_requests_total
-  # Labels identifying the query path, so the check counts only bench traffic.
-  server_requests_match:
-    handler: "/api/v1/query"
-    code: "200"
+# Server-side request accounting: /metrics parsed directly (requests.py),
+# because the SUT does not scrape itself and its own query API cannot see
+# its self-metrics at all.
+query_marker: "/api/v1/query"

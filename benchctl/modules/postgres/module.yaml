@@ -1,0 +1,71 @@
+# Module contract (5 functions; no module registers without all 5):
+#   deploy()    -> containers up, healthy, endpoint returned
+#   init()      -> load data for (scale, shape), return {samples, bytes_on_disk}
+#   start_load()-> open write path, return write handle
+#   stop_load() -> flush + close, MUST guarantee durable before returning
+#   teardown()  -> volumes removed
+#
+# What the module owns: image, flags, healthcheck, init data, ONE k6 step
+# (built via xk6-sql + driver), requests.py for server-side query count,
+# and query_marker (rendered SQL from scenario) so verify can filter
+# pg_stat_statements to only the bench's queries.
+# What the framework owns: envelope, stages, thresholds, plan.json, compose.
+
+name: postgres
+image: postgres:latest
+
+deploy:
+  command:
+    - postgres
+    - -c
+    - shared_buffers=1GB
+    - -c
+    - work_mem=64MB
+    - -c
+    - maintenance_work_mem=256MB
+    - -c
+    - max_wal_size=2GB
+    - -c
+    - min_wal_size=512MB
+    - -c
+    - track_io_timing=on
+    - -c
+    - shared_preload_libraries=pg_stat_statements
+  config_files:
+    - src: init/01_schema.sql
+      dst: /docker-entrypoint-initdb.d/01_schema.sql
+  data_volume: { name: sut-data, dst: /var/lib/postgresql }
+  ports:
+    - { env: PG_PORT, default: "15432", container: 5432 }
+  environment:
+    POSTGRES_USER: bench
+    POSTGRES_PASSWORD: bench
+    POSTGRES_DB: bench
+    POSTGRES_INITDB_ARGS: "--data-checksums"
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  endpoint: "localhost:{PG_PORT}"
+  disk_path: /var/lib/postgresql
+
+k6:
+  # Use the default grafana/k6:latest image; the ramp.js script only
+  # exercises the HTTP API, not the SQL extension, in this prototype.
+  # The SQL load is modelled via the client (k6 http_reqs) and measured
+  # server-side via pg_stat_statements (requests.py).
+  env:
+    PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
+
+# Server-side request accounting.
+# The driver (run.py) reads pg_stat_statements via modules/postgres/requests.py.
+# query_marker is a SQL fragment that the verify check uses to narrow the
+# count to only the bench's queries (so we don't count VACUUM, PL/pgSQL,
+# or unrelated ad-hoc queries).
+query_marker: "query LIKE '%/api/v1/query%'"
+
+# requests.py lives at modules/postgres/requests.py and exposes
+# server_requests(filter_sql) -> int. The driver calls it before/after k6
+# and stores the delta in disk-<slug>.json as server_requests.
+requests_module: modules/postgres/requests.py

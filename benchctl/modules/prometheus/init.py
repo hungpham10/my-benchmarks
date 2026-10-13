@@ -20,7 +20,7 @@ import dataset as d
 import values as v
 import protobuf as p
 
-PROM_URL = os.environ.get("PROM_URL", "http://localhost:9090")
+PROM_URL = os.environ.get("SUT_URL", "http://localhost:19090")
 SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "1000"))
 SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "240"))
 

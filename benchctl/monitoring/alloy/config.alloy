@@ -1,7 +1,9 @@
-// Local-only variant: everything lands in benchctl-monitoring-prometheus.
-// The cloud variant adds one remote_write block; nothing else differs.
+// Single variant: Cloud is the only receiver. There is no local
+// monitoring Prometheus — exact numbers come from du and requests.py,
+// curves go to Cloud. When GRAFANA_CLOUD_RW_URL is empty the driver skips
+// this stack entirely instead of starting a receiver-less Alloy.
 // Validate: docker run --rm -v "$PWD:/etc/alloy:ro" grafana/alloy:latest \
-//   validate /etc/alloy/config.local.alloy
+//   validate /etc/alloy/config.alloy
 
 // Per-container CPU and memory, from one cAdvisor endpoint. Scraped exactly
 // once: cAdvisor answers for EVERY container on this address, so fanning out
@@ -17,9 +19,8 @@ prometheus.scrape "cadvisor" {
 }
 
 // The system under test, whatever the current module is. Prometheus exposes
-// /metrics itself (http requests, TSDB head, WAL); a module that does not
-// gets its request counts from its exporter instead — declared in module.yaml,
-// scraped here under the same job.
+// /metrics itself; a module that does not (postgres) simply yields up=0 here
+// and its curves come from cAdvisor + k6. Nothing errors.
 prometheus.scrape "sut" {
   targets = [{
     "__address__"      = "benchctl-sut:9090",
@@ -34,7 +35,7 @@ prometheus.scrape "sut" {
 // Without these, every run lands on the same series and history is one flat
 // line with no run boundaries.
 prometheus.relabel "identity" {
-  forward_to = [prometheus.remote_write.local.receiver]
+  forward_to = [prometheus.remote_write.cloud.receiver]
   rule {
     source_labels = []
     regex         = ".*"
@@ -49,8 +50,12 @@ prometheus.relabel "identity" {
   }
 }
 
-prometheus.remote_write "local" {
+prometheus.remote_write "cloud" {
   endpoint {
-    url = "http://benchctl-monitoring-prometheus:9090/api/v1/write"
+    url = sys.env("GRAFANA_CLOUD_RW_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_RW_USER")
+      password = sys.env("GRAFANA_CLOUD_RW_PASS")
+    }
   }
 }

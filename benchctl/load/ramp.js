@@ -14,7 +14,9 @@ const plan = JSON.parse(open('../plan.json'));
 
 // Module step: one request against the system under test.
 // The module knows HOW to ask; the framework knows HOW MUCH to ask.
-import { step } from '../modules/prometheus/k6/step.js';
+// The driver symlinks modules/active -> the current module before the run,
+// so this import never names a module and no JS is ever generated.
+import { step } from '../modules/active/k6/step.js';
 
 const latency = new Trend('step_latency_ms', true);
 

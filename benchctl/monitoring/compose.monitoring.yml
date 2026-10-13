@@ -1,14 +1,13 @@
 # Static monitoring stack. Never generated, never per-leg.
 #
-# Hard rule (inherited from the old harness): nothing here writes into the
-# TSDB of the system under test. That TSDB is the thing being measured; one
-# scraped target added to it would corrupt the bytes-per-sample headline.
-# Everything lands in monitoring-prometheus (local) and optionally Cloud.
+# Alloy + cAdvisor only. Curves (CPU/memory per container, SUT self-metrics)
+# go straight to Grafana Cloud — there is no local monitoring Prometheus.
+# The exact numbers (disk, request counts) never needed it either: disk comes
+# from du, request counts from each module's own requests.py.
 #
-# The SUT joins via the external network `benchctl-mon`, which the driver
-# creates once. Alloy reaches it as benchctl-sut:9090 regardless of which
-# module is under test — which is why cAdvisor + this works identically for
-# every module, even ones that expose no /metrics of their own.
+# When GRAFANA_CLOUD_RW_URL is empty (fork PRs get no secrets) the driver
+# skips this stack entirely: an Alloy with no receiver is a crash loop, not
+# monitoring. The local summary.json stays the record.
 services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
@@ -34,7 +33,7 @@ services:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/var/lib/alloy/data
-      - /etc/alloy/${ALLOY_CONFIG:-config.local.alloy}
+      - /etc/alloy/config.alloy
     volumes:
       - ./alloy:/etc/alloy:ro
       - alloy-data:/var/lib/alloy/data
@@ -45,39 +44,14 @@ services:
       - GRAFANA_CLOUD_RW_USER=${GRAFANA_CLOUD_RW_USER:-}
       - GRAFANA_CLOUD_RW_PASS=${GRAFANA_CLOUD_RW_PASS:-}
     depends_on:
-      monitoring-prometheus:
-        condition: service_healthy
-    networks:
-      - mon
-    restart: unless-stopped
-
-  monitoring-prometheus:
-    image: prom/prometheus:latest
-    container_name: benchctl-monitoring-prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=2d
-      - --web.enable-remote-write-receiver
-    volumes:
-      - ./prometheus:/etc/prometheus:ro
-      - mon-prom-data:/prometheus
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    ports:
-      # Fixed and out of the way: verify/ runs on the host and queries this
-      # for the server-side request count. Nothing measured listens here.
-      - "19091:9090"
+      cadvisor:
+        condition: service_started
     networks:
       - mon
     restart: unless-stopped
 
 volumes:
   alloy-data:
-  mon-prom-data:
 
 networks:
   mon:
