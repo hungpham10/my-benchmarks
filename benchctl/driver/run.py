@@ -82,6 +82,7 @@ def gen_compose(module, cfg, mod_cfg):
                     "sut-data:/prometheus",
                 ],
                 "healthcheck": {"test": ["CMD-SHELL", dep["healthcheck"]]},
+                "networks": ["mon"],
             },
             "k6": {
                 "build": {"context": ".", "dockerfile": "load/Dockerfile.k6"},
@@ -97,10 +98,17 @@ def gen_compose(module, cfg, mod_cfg):
                 "volumes": ["./results:/results", "./load:/scripts:ro",
                             "./plan.json:/plan.json:ro",
                             "./modules:/modules:ro"],
+                # Same network as the SUT. Without this, k6 lands on the
+                # compose default network while the SUT is only on benchctl-mon,
+                # and every request dies with status 0 — fast enough (connection
+                # refused) to look like a real latency curve. The server_requests
+                # check caught this: 69 sent, 0 handled.
+                "networks": ["mon"],
                 "depends_on": ["sut"],
             },
         },
         "volumes": {"sut-data": {}},
+        "networks": {"mon": {"name": "benchctl-mon", "external": True}},
     }
 
 
@@ -130,8 +138,36 @@ def disk_bytes_du():
     return int(p.stdout.strip().split()[0])
 
 
+def start_monitoring(module):
+    """Static stack, outside the measured envelope.
+
+    cAdvisor + Alloy + a local monitoring Prometheus, all from the static
+    monitoring/compose.monitoring.yml — never generated. Runs for the whole
+    leg so CPU/memory/request curves cover init through k6.
+    """
+    sh("docker", "network", "create", "benchctl-mon", check=False)
+    env = {
+        "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", "local"),
+        "BENCH_MODULE": module,
+        "ALLOY_CONFIG": ("config.cloud.alloy"
+                         if os.environ.get("GRAFANA_CLOUD_RW_URL") else
+                         "config.local.alloy"),
+    }
+    print(f"[benchctl] monitoring up ({env['ALLOY_CONFIG']})", flush=True)
+    sh("docker", "compose", "-f", "monitoring/compose.monitoring.yml",
+       "up", "-d", "--wait", "--wait-timeout", "60",
+       env={**os.environ, **env})
+
+
+def stop_monitoring():
+    sh("docker", "compose", "-f", "monitoring/compose.monitoring.yml",
+       "down", "-v", check=False)
+    print("[benchctl] monitoring down", flush=True)
+
+
 def main():
     scen_path = sys.argv[1]
+    os.environ["BENCHCTL_SCENARIO"] = scen_path
     scenario = yaml.safe_load(open(scen_path))
     cfg = load_cfg()
     os.makedirs(RESULTS, exist_ok=True)
@@ -141,6 +177,8 @@ def main():
         mod_cfg = yaml.safe_load(
             open(os.path.join(ROOT, "modules", module, "module.yaml")))
         print(f"[benchctl] === {module} ===", flush=True)
+
+        start_monitoring(module)
 
         plan = gen_plan(scenario, cfg)
         json.dump(plan, open(os.path.join(ROOT, "plan.json"), "w"), indent=1)
@@ -195,7 +233,9 @@ def main():
               "that IS the breaking point)", flush=True)
 
         sh("docker", "compose", "-f", "docker-compose.gen.yml", "down", "-v")
-        print(f"[benchctl] === {module} done ===", flush=True)
+        print(f"[benchctl] === {module} done === "
+              "(monitoring stays up: verify reads it, `make down` stops it) ===",
+              flush=True)
 
 
 if __name__ == "__main__":

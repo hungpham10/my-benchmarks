@@ -33,3 +33,15 @@ ingest:
 query:
   path: /api/v1/query
   step_file: step.js
+
+# Server-side request accounting: what the SERVER says it handled.
+# k6 counts at the client (http_reqs); this counts at the server. The two
+# must agree within tolerance — a gap means requests died on the wire that
+# k6 never saw, and the latency curve is missing its worst points.
+monitoring:
+  exporters: []   # prometheus exposes /metrics itself; nothing to add
+  server_requests_metric: prometheus_http_requests_total
+  # Labels identifying the query path, so the check counts only bench traffic.
+  server_requests_match:
+    handler: "/api/v1/query"
+    code: "200"

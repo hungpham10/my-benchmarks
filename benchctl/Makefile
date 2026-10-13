@@ -1,8 +1,13 @@
 SCENARIO ?= scenarios/counter-rate.yaml
 
 run:
-	python3 driver/run.py $(SCENARIO)
+	export BENCHCTL_SCENARIO=$(SCENARIO); \
+	python3 driver/run.py $(SCENARIO); \
 	python3 verify/check.py
+
+down:
+	docker compose -f monitoring/compose.monitoring.yml down -v 2>/dev/null || docker-compose -f monitoring/compose.monitoring.yml down -v 2>/dev/null || true
+	docker network rm benchctl-mon 2>/dev/null || true
 
 smoke:
 	@echo "smoke = unit checks that need no containers"

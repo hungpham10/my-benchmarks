@@ -113,14 +113,19 @@ jobs:
         run: |
           rm -rf results plan.json docker-compose.gen.yml compose.gen.json
           mkdir -p results
+          export BENCHCTL_SCENARIO="$SCENARIO"
           python3 driver/run.py "$SCENARIO"
           python3 verify/check.py
 
       - name: Tear down
-        # Always, even on failure. The driver downs its own stack per system,
-        # but a failed job may die between up and down.
+        # Always, even on failure. The SUT is downed per leg by the driver,
+        # but the monitoring stack stays up through verify by design, so it
+        # is stopped here. Both compose binaries: the runner has `docker
+        # compose`, dev machines may only have `docker-compose`.
         if: always()
-        run: (docker compose -f docker-compose.gen.yml down -v || docker-compose -f docker-compose.gen.yml down -v) 2>/dev/null || true
+        run: |
+          (docker compose -f monitoring/compose.monitoring.yml down -v || docker-compose -f monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
+          docker network rm benchctl-mon 2>/dev/null || true
 
       - name: Upload results
         if: always()
