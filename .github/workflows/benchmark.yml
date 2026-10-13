@@ -1,14 +1,16 @@
-# Prometheus vs PostgreSQL metrics benchmark.
+# benchctl pipeline.
 #
 # Three ways in, deliberately different:
 #
-#   pull_request  smoke only. Validates that a change to the harness still runs,
-#                 in about two minutes. A full run would make every PR unusable.
-#   schedule      nightly full, to catch upstream drift in the `:latest` images.
+#   pull_request  smoke only (scenarios/smoke.yaml, ~2 min). Validates that a
+#                 change still runs end to end. A full run would make every PR
+#                 unusable.
+#   schedule      nightly full (scenarios/counter-rate.yaml), to catch upstream
+#                 drift in the `:latest` images.
 #   dispatch      manual, full by default, for a deliberate run.
 #
-# Both images under test are `:latest`, so these numbers describe whatever the
-# tag resolved to on the day. That is why the nightly run exists at all.
+# The system under test is on `:latest`, so numbers describe whatever the tag
+# resolved to on the day. That is why the nightly run exists at all.
 
 name: benchmark
 
@@ -16,7 +18,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/benchmark.yml'
-      - 'prom-vs-postgres/**'
+      - 'benchctl/**'
   schedule:
     # 03:17 UTC. Off the hour so it does not queue behind everyone else's
     # midnight jobs.
@@ -33,8 +35,6 @@ on:
         type: boolean
         default: false
 
-# Declared explicitly rather than inherited. A missing scope fails at the API
-# call with a 403 that looks like a permissions bug in the workflow.
 permissions:
   contents: read
 
@@ -46,36 +46,18 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    # Full scale is build (~2) + build-k6 (~3) + up (~1) + ingest (~1) +
-    # footprint + query (~36-108) + k6 matrix (30 cells x 180s ≈ 90) + parity (~1).
-    # 240 leaves room for a slow image pull day and warm cache misses.
-    timeout-minutes: 240
+    # Full scale: up + init (3.6M samples) + k6 ramp (~14 min) + verify.
+    timeout-minutes: 120
 
-    # Everything the benchmark needs lives in one subdirectory, but GitHub only
-    # reads workflows from ./.github/workflows. So the workflow sits at the repo
-    # root and points the shell at the benchmark.
     defaults:
       run:
-        working-directory: prom-vs-postgres
+        working-directory: benchctl
 
-    # Job level, because GitHub's step schema has no `permissions` key at all:
-    # putting it on a step makes the whole workflow fail to parse, with an
-    # HTTP 422 at dispatch time and no run logs to explain why. That is broader
-    # than the publish step needs, and it is accepted here because this job
-    # holds no secrets and its only write is results/.
     permissions:
       contents: write
       pull-requests: write
 
     env:
-      # Identity of this run, stamped onto every monitoring sample by a relabel
-      # rule in the Alloy config. cAdvisor's series have constant labels, so
-      # without these every run would land on the same series and the history
-      # in Grafana Cloud would be one flat line with no run boundaries.
-      #
-      # run_id is the Actions run number, not a timestamp: it is the one a
-      # reader can paste into the run URL, and it is stable if the job is
-      # retried (run_attempt disambiguates that).
       BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}
       BENCH_COMMIT: ${{ github.sha }}
 
@@ -88,140 +70,85 @@ jobs:
       - name: Report runner capacity
         # The envelope is only meaningful if the machine can honour it. Fail
         # loudly rather than silently measuring the runner instead of the
-        # systems under test.
+        # system under test.
         run: |
           echo "cpus: $(nproc)"
           free -g | head -2
           df -h "$RUNNER_TEMP" | tail -1
 
-      - name: Configure scale
+      - name: Select scenario
         # A pull request never runs full, whatever the inputs say.
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'JOBS=2'          >> "$GITHUB_ENV"
-            echo 'INSTANCES_PER_JOB=5' >> "$GITHUB_ENV"
-            echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
-            echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
-            echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
-            echo 'K6_VUS=1'            >> "$GITHUB_ENV"
-            echo 'K6_DURATION=60s'     >> "$GITHUB_ENV"
+            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
             echo "smoke (pull_request)"
           elif [ "${{ inputs.scale }}" = "smoke" ]; then
-            echo 'JOBS=2'          >> "$GITHUB_ENV"
-            echo 'INSTANCES_PER_JOB=5' >> "$GITHUB_ENV"
-            echo 'WINDOW_MINUTES=15'   >> "$GITHUB_ENV"
-            echo 'QUERY_ITERATIONS=30' >> "$GITHUB_ENV"
-            echo 'QUERY_WARMUP=5'      >> "$GITHUB_ENV"
-            echo 'K6_VUS=1'            >> "$GITHUB_ENV"
-            echo 'K6_DURATION=60s'     >> "$GITHUB_ENV"
+            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
             echo "smoke (dispatch)"
           else
+            echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
             echo "full"
           fi
 
-      # Operational metrics for the run itself, pushed to Grafana Cloud so the
-      # history outlives the runner. Started before the benchmark, because the
-      # window worth capturing is ingest and query, not the idle state.
-      #
-      # Skipped on pull_request for two reasons. A PR run is a two-minute smoke
-      # test at 10 series, which would bury the real runs in the stack. And a
-      # pull request from a fork is not given repository secrets at all, so
-      # there would be nothing to push with. `monitoring.enabled` records which
-      # it was, so a missing Grafana series is distinguishable from a
-      # deliberately skipped run.
-      # Decides whether to push at all, and materialises the credentials that
-      # compose will hand to Alloy.
-      - name: Prepare Grafana Cloud credentials
-        id: monitoring
-        if: github.event_name != 'pull_request'
-        env:
-          GRAFANA_CLOUD_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
-          GRAFANA_CLOUD_ID: ${{ secrets.GRAFANA_CLOUD_ID }}
-          GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GRAFANA_CLOUD_URL}" ] || [ -z "${GRAFANA_CLOUD_TOKEN}" ]; then
-            echo "Grafana Cloud secrets are not set; running without the cloud push."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Written to a file because that is how compose passes them to Alloy.
-          # The file is gitignored, so it cannot reach the results PR. Written
-          # with a restrictive mode: it holds a credential for the lifetime of
-          # the job.
-          umask 077
-          printf 'GRAFANA_CLOUD_URL=%s\nGRAFANA_CLOUD_ID=%s\nGRAFANA_CLOUD_TOKEN=%s\n' \
-            "$GRAFANA_CLOUD_URL" "$GRAFANA_CLOUD_ID" "$GRAFANA_CLOUD_TOKEN" \
-            > monitoring/.env.monitoring
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-
-      - name: Build the bench image
-        run: make build
-
-      - name: Build the k6 image
-        run: make build-k6
-
-      # After the build, immediately before the run: the stack is up a few
-      # seconds before the targets rather than minutes, and --no-deps keeps the
-      # monitoring stack from being what starts postgres.
-      - name: Start monitoring
-        if: steps.monitoring.outputs.enabled == 'true'
-        run: make monitor-cloud MONITOR_DEPS=--no-deps
+      - name: Install driver deps
+        # The driver runs on the runner (not in a container): it generates
+        # plan.json + compose and shells out to docker. numpy/cramjam build
+        # the dataset; pyyaml reads scenario + module files.
+        run: pip install numpy cramjam pyyaml
 
       - name: Run the benchmark
-        # Start from an empty results/, not just a missing dataset.json. Every
-        # phase writes independently, so a run that dies after ingest would
-        # leave the previous query.json and report.md in place and the upload
-        # step would publish stale numbers as if they were fresh.
+        # Start from an empty results/, not just missing files. A run that
+        # dies after init would otherwise leave a previous summary.json in
+        # place and verify would pass on stale numbers as if they were fresh.
         #
-        # dataset.json in particular must not survive: later phases reuse its
-        # timestamp anchor, and a committed one is hours old by the time this
-        # runs. Prometheus rejects samples older than MaxTime - chunkRange/2
-        # (~1h at the default 2h chunk range).
+        # GRAFANA_CLOUD_RW_URL is empty unless the secrets below exist (fork
+        # PRs get no secrets). k6 then logs a connection-refused warning per
+        # flush interval and keeps measuring locally; the local summary.json
+        # is still the record. An empty URL must stay distinguishable from a
+        # deliberately skipped push, so the verify output records which it was.
+        env:
+          GRAFANA_CLOUD_RW_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
         run: |
-          rm -rf results
+          rm -rf results plan.json docker-compose.gen.yml compose.gen.json
           mkdir -p results
-          make bench
-
-      # Fails the job if nothing is arriving. A remote_write endpoint that stops
-      # accepting writes fails silently otherwise: Alloy queues to disk and the
-      # benchmark carries on producing perfect results that nobody can see the
-      # operational half of.
-      - name: Verify monitoring is delivering
-        if: always() && steps.monitoring.outputs.enabled == 'true'
-        run: |
-          python3 monitoring/check.py
-          echo "  Grafana Cloud: bench $BENCH_RUN_ID at commit $BENCH_COMMIT" \
-            >> "$GITHUB_STEP_SUMMARY"
+          python3 driver/run.py "$SCENARIO"
+          python3 verify/check.py
 
       - name: Tear down
-        # Always, even on failure. `make bench` does not stop the stack, and a
-        # failed job would otherwise leave containers running.
+        # Always, even on failure. The driver downs its own stack per system,
+        # but a failed job may die between up and down.
         if: always()
-        run: make down || true
+        run: (docker compose -f docker-compose.gen.yml down -v || docker-compose -f docker-compose.gen.yml down -v) 2>/dev/null || true
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: results-${{ github.run_number }}
-          path: prom-vs-postgres/results/
+          path: benchctl/results/
           if-no-files-found: error
           retention-days: 90
 
       - name: Summarise
         if: always()
         run: |
-          echo "### benchmark summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f results/report.md ]; then
-            cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "### benchctl summary" >> "$GITHUB_STEP_SUMMARY"
+          for f in results/disk-*.json results/verify.json; do
+            if [ -f "$f" ]; then
+              echo "#### $f" >> "$GITHUB_STEP_SUMMARY"
+              echo '```json' >> "$GITHUB_STEP_SUMMARY"
+              cat "$f" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if [ -f results/summary.json ]; then
+            python3 verify/summarise.py >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
+            echo "no k6 summary produced" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Opens a PR rather than pushing to main. This is a public repository and
-      # results/ is the evidence behind a published post, so a run landing on
-      # main should be a diff somebody can read rather than a push.
+      # Opens a PR rather than pushing to main. Results are evidence, so a run
+      # landing on main should be a diff somebody can read rather than a push.
       - name: Open a PR with the results
         if: github.event_name == 'workflow_dispatch' && inputs.publish
         uses: actions/github-script@v7
@@ -238,7 +165,7 @@ jobs:
 
             const base = process.env.GITHUB_REF_NAME || 'main';
             run(`git checkout -b ${branch}`);
-            run(`git add prom-vs-postgres/results`);
+            run(`git add benchctl/results`);
 
             // Nothing changed: the recorded run reproduces exactly.
             const staged = run(`git diff --cached --name-only`).trim();
@@ -256,9 +183,8 @@ jobs:
               '',
               `Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
               '',
-              'Image digests for this run are in `prom-vs-postgres/results/environment.json`.',
-              'If these numbers differ from the previous run, the cause is upstream image',
-              'drift: both systems under test are on `:latest`.',
+              'The system under test is on `:latest`. If these numbers differ',
+              'from the previous run, the cause is upstream image drift.',
             ].join('\n');
 
             const { data: pr } = await github.rest.pulls.create({
