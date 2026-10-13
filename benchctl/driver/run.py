@@ -270,6 +270,14 @@ def main():
 
         sh("docker", "compose", "-f", "docker-compose.gen.yml",
            "up", "-d", "--wait", "--wait-timeout", "180", "sut")
+        # Port env vars default from module.yaml before expand(): expand()
+        # substitutes "" for a missing var, which turns the endpoint
+        # "http://localhost:{SUT_PORT}" into "http://localhost:" and the
+        # init then dials port 80 instead of 19090 — Connection refused.
+        # CI does not set SUT_PORT/PG_PORT, so the default is the only
+        # value it can ever see.
+        for p in mod_cfg.get("deploy", {}).get("ports", []):
+            os.environ.setdefault(p["env"], p["default"])
         base = expand(mod_cfg["deploy"]["endpoint"])
 
         print("[benchctl] init data", flush=True)
