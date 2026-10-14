@@ -62,7 +62,8 @@ def server_requests(filter_sql=None):
     n = cur.fetchone()[0]
     cur.close()
     conn.close()
-    return n or 0
+    # Convert Decimal to int for JSON serialization
+    return int(n) if n is not None else 0
 
 
 if __name__ == "__main__":
