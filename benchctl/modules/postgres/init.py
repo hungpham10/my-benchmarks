@@ -101,9 +101,41 @@ def init(ahead_minutes=8):
     # ---- decide variant ---------------------------------------------
     variant = os.environ.get("VARIANT", "jsonb")  # overridden per-leg
 
-    # ---- connect and COPY --------------------------------------------
+    # ---- ensure partitions exist --------------------------------------
+    def ensure_partitions(cur, t_start_ms, t_end_ms):
+        """Create daily partitions for the time range."""
+        from datetime import datetime, timezone
+        start_day = int(t_start_ms) // 1000 // 86400
+        end_day = int(t_end_ms) // 1000 // 86400
+        for day_offset in range(end_day - start_day + 1):
+            day_ts = (start_day + day_offset) * 86400
+            day_str = datetime.fromtimestamp(day_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            for table in ["metrics_jsonb", "metrics_norm_brin"]:
+                cur.execute(
+                    "SELECT bench_ensure_partitions(%s::regclass, %s::date)",
+                    (table, day_str)
+                )
+
+    # ---- read total_samples from dataset.json -----------------------
+    results_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "results")
+    ds_path = os.path.join(results_dir, "dataset.json")
+    total = 1200  # fallback smoke number
+    t_start_ms = 0
+    t_end_ms = 0
+    if os.path.exists(ds_path):
+        with open(ds_path) as f:
+            m = json.load(f)
+        total = m.get("total_samples", 1200)
+        t_start_ms = m.get("t_start_ms", 0)
+        t_end_ms = m.get("t_end_ms", 0)
+
+    # ---- connect and ensure partitions --------------------------------------
     conn = psycopg.connect(dsn, autocommit=True)
     cur = conn.cursor()
+    if t_start_ms and t_end_ms:
+        ensure_partitions(cur, t_start_ms, t_end_ms)
 
     rows = _csv_rows(total, variant)
 
