@@ -40,12 +40,13 @@ def _rewrite_dsn(dsn: str, port: str) -> str:
 
 
 def server_requests(filter_sql=None):
-    """Count queries in pg_stat_statements.
+    """Count total query executions in pg_stat_statements.
 
-    filter_sql: SQL fragment to narrow the count (e.g.
-    "query LIKE '%/api/v1/query%'" ). When None we count *all* statements
-    that pg_stat_statements has tracked; the caller (verify) usually passes
-    a filter so we don't count VACUUM, PL/pgSQL setup, etc.
+    pg_stat_statements stores one row per normalized query text, with a
+    `calls` column counting how many times that query was executed. The
+    correct metric for "how many queries did k6 send" is SUM(calls), not
+    COUNT(*) — the latter counts distinct normalized queries, which is
+    always 1 for a single parametrized query run many times.
     """
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)
     conn = psycopg.connect(dsn, autocommit=True)
@@ -53,15 +54,15 @@ def server_requests(filter_sql=None):
 
     if filter_sql:
         cur.execute(
-            "SELECT count(*) FROM pg_stat_statements WHERE " + filter_sql,
+            "SELECT sum(calls) FROM pg_stat_statements WHERE " + filter_sql,
         )
     else:
-        cur.execute("SELECT count(*) FROM pg_stat_statements")
+        cur.execute("SELECT sum(calls) FROM pg_stat_statements")
 
     n = cur.fetchone()[0]
     cur.close()
     conn.close()
-    return n
+    return n or 0
 
 
 if __name__ == "__main__":

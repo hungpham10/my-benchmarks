@@ -51,10 +51,7 @@ deploy:
   disk_path: /var/lib/postgresql
 
 k6:
-  # Use the default grafana/k6:latest image; the ramp.js script only
-  # exercises the HTTP API, not the SQL extension, in this prototype.
-  # The SQL load is modelled via the client (k6 http_reqs) and measured
-  # server-side via pg_stat_statements (requests.py).
+  dockerfile: ../../load/Dockerfile.k6-pg
   env:
     PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
 

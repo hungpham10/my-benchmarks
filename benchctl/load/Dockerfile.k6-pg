@@ -1,0 +1,19 @@
+# k6 with SQL support for PostgreSQL, built with xk6-sql extension.
+#
+# The official grafana/k6 image has no database support. xk6-sql provides the
+# sql.open() API, but ships NO drivers — each database is a separate module.
+# We need both xk6-sql (interface) and xk6-sql-driver-postgres (driver).
+#
+# Note: xk6 puts the binary in /xk6, not /home/xk6 -- the image's WORKDIR is
+# /home/xk6 but xk6 itself writes to /xk6/k6. COPY from the wrong path fails
+# at build time with "not found", which looks like the build failed rather
+# than a typo.
+FROM grafana/xk6:latest AS build
+RUN xk6 build \
+      --with github.com/grafana/xk6-sql \
+      --with github.com/grafana/xk6-sql-driver-postgres
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=build /xk6/k6 /usr/local/bin/k6
+ENTRYPOINT ["k6"]
