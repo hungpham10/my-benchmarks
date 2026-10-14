@@ -59,11 +59,25 @@ def init(ahead_minutes=8):
     We COPY exactly that many rows so pg_stat_statements counts them.
     """
     # ---- resolve DSN -------------------------------------------------
+    # The driver runs on the host, not in the Docker network, so we must
+    # use localhost with the mapped port. The driver sets PG_PORT env var.
+    port = os.environ.get("PG_PORT", "15432")
     dsn = os.environ.get("PG_DSN")
     if not dsn:
-        # Fallback: docker-compose service name 'postgres' on network
-        # benchctl-mon. This is used when the driver hasn't set PG_DSN explicitly.
-        dsn = "postgres://bench:bench@postgres:5432/bench?sslmode=disable"
+        dsn = f"postgres://bench:bench@localhost:{port}/bench?sslmode=disable"
+    else:
+        # Override host/port in the provided DSN to use localhost:mapped_port
+        # PG_DSN from module.yaml uses 'sut' which only works inside Docker network
+        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        parsed = urlparse(dsn)
+        dsn = urlunparse((
+            parsed.scheme,
+            f"localhost:{port}",
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
 
     # ---- read total_samples from dataset.json -----------------------
     results_dir = os.path.join(
