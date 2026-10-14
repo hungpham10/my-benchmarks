@@ -87,7 +87,8 @@ def render_query(system, scenario):
     spec = queries[system]
     if isinstance(spec, str):
         return spec
-    sys.path.insert(0, OLD_GEN)
+    # The queries module is in prom-vs-postgres/bench/, not generator/
+    sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "prom-vs-postgres", "bench"))
     import queries as Q
     manifest = json.load(open(os.path.join(RESULTS, "dataset.json")))
     start_s = manifest["t_start_ms"] / 1000.0
@@ -210,6 +211,7 @@ def start_monitoring(module):
     if not os.environ.get("GRAFANA_CLOUD_RW_URL"):
         print("[benchctl] monitoring skipped (no Cloud URL)", flush=True)
         return False
+    # Network may already exist from a previous leg; ignore "already exists" error.
     sh("docker", "network", "create", "benchctl-mon", check=False)
     env = {
         "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", "local"),
