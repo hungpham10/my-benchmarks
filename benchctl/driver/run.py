@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 try:
     import yaml
@@ -44,6 +45,19 @@ def sh(*args, env=None, check=True):
     if args[:2] == ("docker", "compose"):
         args = tuple(compose_bin()) + tuple(args[2:])
     return subprocess.run(args, cwd=ROOT, env=e, check=check)
+
+
+def _ts_literal(ms):
+    """A quoted timestamptz literal for SQL.
+
+    xk6-sql exposes conn.query(sql) with no bind parameters, so the driver has
+    to substitute values into the SQL text. Emitting a bare float instead gives
+    a numeric literal, and PostgreSQL removed the numeric->timestamptz cast,
+    so `%s::timestamptz` fails with 42846. Returning an ISO8601 string wrapped
+    in single quotes makes `time BETWEEN '...'::timestamptz AND '...'::timestamptz`
+    which is valid.
+    """
+    return "'" + datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat() + "'"
 
 
 def load_cfg():
@@ -91,13 +105,11 @@ def render_query(system, scenario):
     sys.path.insert(0, SHARED)
     import queries as Q
     manifest = json.load(open(os.path.join(RESULTS, "dataset.json")))
-    start_s = manifest["t_start_ms"] / 1000.0
-    end_s = manifest["t_end_ms"] / 1000.0
     for q in Q.QUERIES:
         if q["name"] == spec["query"]:
             sql = q["sql"][spec["table"]]
-            out = sql.replace("%s", repr(start_s), 1)
-            out = out.replace("%s", repr(end_s), 1)
+            out = sql.replace("%s", _ts_literal(manifest["t_start_ms"]), 1)
+            out = out.replace("%s", _ts_literal(manifest["t_end_ms"]), 1)
             assert "%s" not in out, "unrendered placeholder in " + spec["query"]
             return " ".join(out.split())
     raise RuntimeError("unknown query: " + spec["query"])
@@ -256,9 +268,6 @@ def main():
     os.makedirs(RESULTS, exist_ok=True)
     run_id = cfg["run"]["run_id"]
     ds = scenario["dataset"]
-
-    # Debug: print version
-    print(f"[benchctl] VERSION: 20241014-02", flush=True)
 
     # Build k6 image ONCE for all systems (shared image with xk6-sql)
     build_k6_image()
