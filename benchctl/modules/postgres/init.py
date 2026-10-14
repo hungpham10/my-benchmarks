@@ -115,9 +115,10 @@ def init(ahead_minutes=8):
                 )
 
     # ---- read total_samples from dataset.json -----------------------
-    results_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "results")
+    # Use RESULTS_DIR env var if set by driver, else compute from file location
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"))
     ds_path = os.path.join(results_dir, "dataset.json")
     total = 1200  # fallback smoke number
     t_start_ms = 0
@@ -130,6 +131,20 @@ def init(ahead_minutes=8):
         t_start_ms = m.get("t_start_ms", 0)
         t_end_ms = m.get("t_end_ms", 0)
         interval_s = m.get("interval_seconds", 15)
+        # Debug: print what we read
+        print(f"[init] read dataset: total={total}, t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}", file=sys.stderr)
+    else:
+        print(f"[init] dataset.json not found at {ds_path}, using fallback", file=sys.stderr)
+
+    # Fallback: if dataset.json is missing or invalid, compute from scenario params
+    if t_start_ms == 0:
+        ahead_min = int(os.environ.get("AHEAD_MINUTES", "8"))
+        window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
+        interval_s = int(os.environ.get("INTERVAL_SECONDS", "15"))
+        now_ms = int(time.time() * 1000)
+        t_start_ms = int(time.time() * 1000) - (window_min - ahead_min) * 60 * 1000
+        t_end_ms = t_start_ms + window_min * 60 * 1000
+        print(f"[init] fallback timestamps: t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}", file=sys.stderr)
 
     # ---- connect and ensure partitions --------------------------------------
     conn = psycopg.connect(dsn, autocommit=True)
