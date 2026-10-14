@@ -30,7 +30,6 @@ export const options = {
       stages: plan.load.stages.map((s) => ({ target: s.target, duration: s.duration })),
       preAllocatedVUs: 50,
       maxVUs: 500,
-      gracefulRampDown: plan.load.graceful_ramp_down || '30s',
     },
   },
   thresholds: {
