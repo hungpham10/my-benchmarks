@@ -28,7 +28,7 @@ on:
       scale:
         description: Benchmark scale
         type: choice
-        options: [smoke, full]
+        options: [smoke, load, full]
         default: full
       publish:
         description: Open a PR with the results
@@ -47,6 +47,7 @@ jobs:
   bench:
     runs-on: ubuntu-latest
     # Full scale: up + init (3.6M samples) + k6 ramp (~14 min) + verify.
+    # load-test is ~10 min + init + verify. Keep 120 for safety.
     timeout-minutes: 120
 
     defaults:
@@ -85,6 +86,9 @@ jobs:
           elif [ "${{ inputs.scale }}" = "smoke" ]; then
             echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
             echo "smoke (dispatch)"
+          elif [ "${{ inputs.scale }}" = "load" ]; then
+            echo 'SCENARIO=scenarios/load-test.yaml' >> "$GITHUB_ENV"
+            echo "load-test (dispatch)"
           else
             echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
             echo "full"

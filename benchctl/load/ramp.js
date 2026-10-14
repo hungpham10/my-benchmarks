@@ -21,6 +21,7 @@ import { step } from '../modules/active/k6/step.js';
 const latency = new Trend('step_latency_ms', true);
 
 export const options = {
+  flushInterval: '3s',
   scenarios: {
     ramp: {
       executor: plan.load.executor,
@@ -29,6 +30,7 @@ export const options = {
       stages: plan.load.stages.map((s) => ({ target: s.target, duration: s.duration })),
       preAllocatedVUs: 50,
       maxVUs: 500,
+      gracefulRampDown: plan.load.graceful_ramp_down || '30s',
     },
   },
   thresholds: {
