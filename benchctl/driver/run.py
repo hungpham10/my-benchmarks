@@ -290,6 +290,7 @@ def main():
             "SUT_URL": base,
             "PG_DSN": mod_cfg.get("k6", {}).get("env", {}).get("PG_DSN",
                               "postgres://bench:bench@postgres:5432/bench?sslmode=disable"),
+            "PG_PORT": str(mod_cfg.get("deploy", {}).get("ports", [{}])[0].get("default", "15432")),
             "JOBS": str(ds["jobs"]),
             "INSTANCES_PER_JOB": str(ds["instances_per_job"]),
             "INTERVAL_SECONDS": str(ds.get("interval_seconds", 15)),

@@ -15,9 +15,10 @@ export function setup() {
   return {};
 }
 
-export default function () {
+export function step() {
   const result = conn.query(QUERY);
   check(result, { 'query ok': (r) => r.length >= 0 });
+  return true;
 }
 
 export function teardown(data) {
