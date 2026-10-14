@@ -62,8 +62,9 @@ k6:
 # The driver (run.py) reads pg_stat_statements via modules/postgres/requests.py.
 # query_marker is a SQL fragment that the verify check uses to narrow the
 # count to only the bench's queries (so we don't count VACUUM, PL/pgSQL,
-# or unrelated ad-hoc queries).
-query_marker: "query LIKE '%/api/v1/query%'"
+# or unrelated ad-hoc queries). For postgres, we filter by the table name
+# that appears in the rendered SQL.
+query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%'"
 
 # requests.py lives at modules/postgres/requests.py and exposes
 # server_requests(filter_sql) -> int. The driver calls it before/after k6
