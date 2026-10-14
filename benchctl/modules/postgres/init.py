@@ -30,6 +30,7 @@ def _csv_rows(total, variant):
     We generate evenly-spaced timestamps over a 45‑min window, 15‑s interval.
     """
     import math
+    from datetime import datetime, timezone
     interval_s = 15
     window_min = 45
     n_series = 20  # fixed for smoke; the real count comes from dataset.json
@@ -40,14 +41,16 @@ def _csv_rows(total, variant):
     for s in range(n_series):
         for i in range(n_samples):
             ts = start_ts + i * interval_s
+            # Convert Unix timestamp to ISO format for PostgreSQL timestamptz
+            ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
             val = 100 + 50 * math.sin(i * 0.1 + s * 0.5)
             if variant == "norm":
                 # time, series_id, value
-                rows.append((ts, 0, val))
+                rows.append((ts_iso, 0, val))
             else:
                 # time, labels, value
                 lbls = '{"__name__":"queue_depth"}'
-                rows.append((ts, lbls, val))
+                rows.append((ts_iso, lbls, val))
     return rows
 
 
