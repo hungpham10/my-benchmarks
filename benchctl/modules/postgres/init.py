@@ -68,11 +68,13 @@ def init(ahead_minutes=8):
     else:
         # Override host/port in the provided DSN to use localhost:mapped_port
         # PG_DSN from module.yaml uses 'sut' which only works inside Docker network
-        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        from urllib.parse import urlparse, urlunparse
         parsed = urlparse(dsn)
+        # Preserve username and password from the original DSN
+        netloc = f"{parsed.username}:{parsed.password}@localhost:{port}" if parsed.username else f"localhost:{port}"
         dsn = urlunparse((
             parsed.scheme,
-            f"localhost:{port}",
+            netloc,
             parsed.path,
             parsed.params,
             parsed.query,
