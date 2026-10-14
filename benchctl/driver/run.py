@@ -256,6 +256,9 @@ def main():
     # Build k6 image ONCE for all systems (shared image with xk6-sql)
     build_k6_image()
 
+    # Start monitoring ONCE before any SUT (creates benchctl-mon network)
+    monitoring_started = start_monitoring(scenario["systems"][0])
+
     for system in scenario["systems"]:
         module, variant = split_system(system)
         mod_cfg = yaml.safe_load(
