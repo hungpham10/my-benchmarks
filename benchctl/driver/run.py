@@ -115,7 +115,7 @@ def gen_plan(system, scenario, cfg, mod_cfg):
     }
 
 
-def gen_compose(module, cfg, mod_cfg):
+def gen_compose(module, cfg, mod_cfg, system, scenario):
     env = cfg["envelope"]
     dep = mod_cfg["deploy"]
     volumes = []
@@ -280,7 +280,7 @@ def main():
         if os.path.islink(active) or os.path.exists(active):
             os.remove(active)
         os.symlink(module, active)
-        compose = gen_compose(module, cfg, mod_cfg)
+        compose = gen_compose(module, cfg, mod_cfg, system, scenario)
         json.dump(compose, open(os.path.join(ROOT, "compose.gen.json"), "w"))
         buf = io.StringIO()
         yaml.safe_dump(compose, buf, default_flow_style=False)
