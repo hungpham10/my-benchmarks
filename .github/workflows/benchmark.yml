@@ -128,6 +128,7 @@ jobs:
           GRAFANA_CLOUD_RW_URL: ${{ secrets.GRAFANA_CLOUD_URL }}
           GRAFANA_CLOUD_RW_USER: ${{ secrets.GRAFANA_CLOUD_ID }}
           GRAFANA_CLOUD_RW_PASS: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+        working-directory: benchctl
         run: |
           rm -rf results plan.json docker-compose.gen.yml compose.gen.json
           mkdir -p results
@@ -141,8 +142,9 @@ jobs:
         # is stopped here. Both compose binaries: the runner has `docker
         # compose`, dev machines may only have `docker-compose`.
         if: always()
+        working-directory: benchctl
         run: |
-          (docker compose -f monitoring/compose.monitoring.yml down -v || docker-compose -f monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
+          (docker compose -f ../monitoring/compose.monitoring.yml down -v || docker-compose -f ../monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
           docker network rm benchctl-mon 2>/dev/null || true
 
       - name: Upload results
@@ -156,6 +158,7 @@ jobs:
 
       - name: Summarise
         if: always()
+        working-directory: benchctl
         run: |
           echo "### benchctl summary" >> "$GITHUB_STEP_SUMMARY"
           for f in results/disk-*.json results/verify.json; do
