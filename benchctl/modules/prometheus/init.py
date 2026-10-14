@@ -13,9 +13,8 @@ import sys
 import time
 from urllib.parse import urlparse
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__),
-                               "..", "..", "..",
-                               "prom-vs-postgres", "generator"))
+SHARED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared")
+sys.path.insert(0, SHARED)
 import dataset as d
 import values as v
 import protobuf as p

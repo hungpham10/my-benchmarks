@@ -43,7 +43,7 @@ ingest:
   ahead_minutes: 8
 
 k6:
-  image: grafana/k6:latest
+  # Uses shared benchctl-k6 image (built once with xk6-sql + postgres driver)
   env:
     PROM_URL: "http://sut:9090"
 

@@ -21,7 +21,7 @@ except ImportError:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, "results")
-OLD_GEN = os.path.join(os.path.dirname(ROOT), "prom-vs-postgres", "generator")
+SHARED = os.path.join(ROOT, "shared")
 
 COMPOSE = None
 
@@ -87,8 +87,8 @@ def render_query(system, scenario):
     spec = queries[system]
     if isinstance(spec, str):
         return spec
-    # The queries module is in prom-vs-postgres/bench/, not generator/
-    sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "prom-vs-postgres", "bench"))
+    # The queries module is in shared/, not generator/
+    sys.path.insert(0, SHARED)
     import queries as Q
     manifest = json.load(open(os.path.join(RESULTS, "dataset.json")))
     start_s = manifest["t_start_ms"] / 1000.0
@@ -158,6 +158,7 @@ def gen_compose(module, cfg, mod_cfg):
         k6env[k] = expand(v)
     k6svc = {
         "profiles": ["k6"],
+        "image": "benchctl-k6",
         "deploy": {"resources": {"limits": {
             "cpus": env["k6_cpus"], "memory": env["k6_memory"]}}},
         "environment": k6env,
@@ -172,10 +173,6 @@ def gen_compose(module, cfg, mod_cfg):
         "networks": ["mon"],
         "depends_on": ["sut"],
     }
-    if k6cfg.get("dockerfile"):
-        k6svc["image"] = f"benchctl-k6-{module}"
-    else:
-        k6svc["image"] = k6cfg.get("image", "grafana/k6:latest")
 
     vols = {}
     if dv:
@@ -230,13 +227,21 @@ def stop_monitoring():
     print("[benchctl] monitoring down", flush=True)
 
 
-def build_k6_image(module, mod_cfg):
-    df = mod_cfg.get("k6", {}).get("dockerfile")
-    if not df:
+_K6_IMAGE_BUILT = False
+
+
+def build_k6_image():
+    """Build the single k6 image with xk6-sql + postgres driver.
+
+    Called once before the first system that needs it.
+    """
+    global _K6_IMAGE_BUILT
+    if _K6_IMAGE_BUILT:
         return
-    print(f"[benchctl] building k6 image for {module}", flush=True)
-    sh("docker", "build", "-t", f"benchctl-k6-{module}",
-       "-f", f"modules/{module}/{df}", f"modules/{module}/k6")
+    print("[benchctl] building k6 image (with xk6-sql + postgres driver)", flush=True)
+    sh("docker", "build", "-t", "benchctl-k6",
+       "-f", "load/Dockerfile.k6", "load")
+    _K6_IMAGE_BUILT = True
 
 
 def main():
@@ -248,16 +253,14 @@ def main():
     run_id = cfg["run"]["run_id"]
     ds = scenario["dataset"]
 
-    # Start monitoring ONCE for the entire run (shared across all systems)
-    monitoring_started = start_monitoring(scenario["systems"][0])
+    # Build k6 image ONCE for all systems (shared image with xk6-sql)
+    build_k6_image()
 
     for system in scenario["systems"]:
         module, variant = split_system(system)
         mod_cfg = yaml.safe_load(
             open(os.path.join(ROOT, "modules", module, "module.yaml")))
         print(f"[benchctl] === {system} ===", flush=True)
-
-        build_k6_image(module, mod_cfg)
 
         plan = gen_plan(system, scenario, cfg, mod_cfg)
         json.dump(plan, open(os.path.join(ROOT, "plan.json"), "w"), indent=1)
@@ -387,6 +390,19 @@ def main():
     if monitoring_started:
         stop_monitoring()
         print("[benchctl] monitoring stopped", flush=True)
+
+    # Contract check
+    print("[benchctl] checking module contracts...", flush=True)
+    sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "driver"))
+    from contract import main as contract_main
+    contract_main()
+    print("[benchctl] contracts PASS", flush=True)
+
+    # Render report
+    print("[benchctl] rendering report...", flush=True)
+    from report.render import main as report_main
+    report_main()
+    print("[benchctl] report written", flush=True)
 
 
 if __name__ == "__main__":

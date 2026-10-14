@@ -18,6 +18,14 @@ import time
 import psycopg
 
 # ------------------------------------------------------------------
+# Use shared generator (same as Prometheus)
+# ------------------------------------------------------------------
+SHARED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared")
+sys.path.insert(0, SHARED)
+import dataset as d
+import values as v
+
+# ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 def _csv_rows(total, variant, t_start_ms, interval_s, window_min):
@@ -30,24 +38,36 @@ def _csv_rows(total, variant, t_start_ms, interval_s, window_min):
     We generate evenly-spaced timestamps over the window, using the exact
     timestamps from the dataset (t_start_ms to t_end_ms).
     """
-    import math
     from datetime import datetime, timezone
-    # n_samples_per_series = window_min * 60 / interval_s
+
+    # Build series descriptors using shared dataset module
+    series = d.build_series()
+    # Filter to only counter metrics (http_requests_total)
+    counter_series = [s for s in series if s["metric"] == d.COUNTER_METRIC]
+
+    # Generate timestamps for the window
+    # We need timestamps matching the Prometheus scrape intervals
+    interval_ms = interval_s * 1000
     n_samples = int(window_min * 60 / interval_s)
-    n_series = max(1, total // n_samples)
+
+    # Generate values using shared values module (same as Prometheus)
+    # generate_chunk returns (n_series, n_samples) array
+    timestamps = v.generate_timestamps(t_start_ms)
+    values = v.generate_chunk(counter_series)
+
     rows = []
-    for s in range(n_series):
-        for i in range(n_samples):
+    for s in range(len(counter_series)):
+        for i in range(len(timestamps)):
             ts = t_start_ms + i * interval_s * 1000
             # Convert Unix timestamp to ISO format for PostgreSQL timestamptz
-            ts_iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-            val = 100 + 50 * math.sin(i * 0.1 + s * 0.5)
+            ts_iso = datetime.fromtimestamp(timestamps[i] / 1000, tz=timezone.utc).isoformat()
+            val = values[s, i]
             if variant == "norm":
-                # time, series_id, value
+                # time, series_id, value - series_id is 0 for now (simplified)
                 rows.append((ts_iso, 0, val))
             else:
-                # time, labels, value
-                lbls = '{"__name__":"queue_depth"}'
+                # time, labels, value - use same metric name as Prometheus
+                lbls = '{"__name__":"http_requests_total"}'
                 rows.append((ts_iso, lbls, val))
     return rows
 
@@ -144,8 +164,8 @@ def init(ahead_minutes=8):
         ensure_partitions(cur, t_start_ms, t_end_ms)
 
     # Generate rows using timestamps from dataset.json
-    window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
     interval_s = int(os.environ.get("INTERVAL_SECONDS", "15"))
+    window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
     rows = _csv_rows(total, variant, t_start_ms, interval_s, window_min)
 
     # COPY expects the column order matching the table.

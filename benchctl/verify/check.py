@@ -9,21 +9,99 @@ Four checks, each a test (fail = no report), not a comment:
 import json
 import os
 import sys
+import urllib.request
+import urllib.parse
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "results")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHARED = os.path.join(ROOT, "shared")
+sys.path.insert(0, SHARED)
+import queries as Q
 
 
 def check_parity():
+    """Real parity: query each system for actual sample count and sum.
+
+    This verifies both systems actually hold the same data by querying
+    each system directly, not just trusting self-reported sample counts.
+    """
+    import urllib.request
+    import urllib.parse
+    import subprocess
+
     files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
-    if len(files) < 1:
-        return False, "no disk results to compare"
-    samples = set()
+    if len(files) < 2:
+        return False, f"need at least 2 systems for parity, got {len(files)}"
+
+    module_stats = {}
     for f in files:
-        samples.add(json.load(open(os.path.join(RESULTS, f)))["samples"])
-    if len(samples) != 1:
-        return False, f"sample counts differ across systems: {samples}"
-    return True, f"samples agree: {samples.pop()}"
+        disk = json.load(open(os.path.join(RESULTS, f)))
+        module = disk["module"]
+        variant = disk.get("variant", "")
+        slug = f"disk-{module.replace('/', '-')}.json"
+
+        # Get stats from each system
+        if module == "prometheus":
+            # Query Prometheus for count and sum
+            url = "http://localhost:19090/api/v1/query"
+            q = f"sum(count_over_time(http_requests_total[45m]))"
+            url_q = url + "?query=" + urllib.parse.quote(q)
+            with urllib.request.urlopen(url_q, timeout=30) as r:
+                data = json.load(r)
+            res = data["data"]["result"]
+            count = int(float(res[0]["value"][1])) if res else 0
+
+            q = f"sum(http_requests_total)"
+            url_q = url + "?query=" + urllib.parse.quote(q)
+            with urllib.request.urlopen(url_q, timeout=30) as r:
+                data = json.load(r)
+            res = data["data"]["result"]
+            sum_val = float(res[0]["value"][1]) if res else 0.0
+
+        else:
+            # Postgres: query via psycopg
+            dsn = os.environ.get("PG_DSN")
+            if not dsn:
+                dsn = "postgres://bench:bench@localhost:15432/bench?sslmode=disable"
+            # Use the same DSN rewrite as requests.py
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(dsn)
+            port = os.environ.get("PG_PORT", "15432")
+            netloc = f"{parsed.username}:{parsed.password}@localhost:{os.environ.get('PG_PORT', '15432')}" if parsed.username else f"localhost:{os.environ.get('PG_PORT', '15432')}"
+            dsn = urlunparse((
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+
+            import psycopg
+            conn = psycopg.connect(dsn, autocommit=True)
+            cur = conn.cursor()
+
+            variant = "norm" if "norm" in system else "jsonb"
+            table = "metrics_norm_brin" if variant == "norm" else "metrics_jsonb"
+
+            cur.execute(f"SELECT count(*), sum(value) FROM {table}")
+            count, sum_val = cur.fetchone()
+            sum_val = float(sum_val) if sum_val else 0.0
+            cur.close()
+            count = int(count) if count else 0
+
+        module_stats[module] = {"count": count, "sum": sum_val}
+        print(f"[parity] {module}: count={count}, sum={sum_val}")
+
+    # Compare
+    counts = {v["count"] for v in module_stats.values()}
+    sums = {round(v["sum"], 2) for v in module_stats.values()}
+    if len(counts) != 1:
+        return False, f"counts differ: {module_stats}"
+    if len(sums) != 1:
+        return False, f"sums differ: {module_stats}"
+    return True, f"parity ok: count={counts.pop()}, sum={sums.pop()}"
 
 
 def check_continuity(min_points=10):

@@ -51,7 +51,7 @@ deploy:
   disk_path: /var/lib/postgresql
 
 k6:
-  dockerfile: ../../load/Dockerfile.k6-pg
+  # Uses shared benchctl-k6 image (built once with xk6-sql + postgres driver)
   env:
     PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
 

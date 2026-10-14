@@ -1,4 +1,7 @@
+# Generated files
 plan.json
 compose.gen.json
 docker-compose.gen.yml
 results/
+*.jsonl
+dbg.json
