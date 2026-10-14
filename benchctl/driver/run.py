@@ -308,6 +308,30 @@ def main():
             raise RuntimeError("init failed")
         init_res = json.loads(out.stdout.strip().splitlines()[-1])
 
+        # Write dataset.json after the first leg's init so render_query can read it
+        if not os.path.exists(os.path.join(RESULTS, "dataset.json")):
+            import time
+            interval_s = ds.get("interval_seconds", 15)
+            window_min = ds["window_minutes"]
+            ahead_min = ds.get("ahead_minutes", 8)
+            now_ms = int(time.time() * 1000)
+            t_start_ms = now_ms - (window_min - ahead_min) * 60 * 1000
+            t_end_ms = t_start_ms + window_min * 60 * 1000
+            total_series = ds["jobs"] * ds["instances_per_job"] * 2
+            total_samples = total_series * (window_min * 60 // interval_s)
+            manifest = {
+                "t_start_ms": t_start_ms,
+                "t_end_ms": t_end_ms,
+                "total_samples": total_samples,
+                "interval_seconds": interval_s,
+                "window_minutes": window_min,
+                "ahead_minutes": ahead_min,
+                "seed": ds.get("seed", 20240101),
+                "targets": [system],
+            }
+            json.dump(manifest, open(os.path.join(RESULTS, "dataset.json"), "w"), indent=1)
+            print(f"[benchctl] wrote dataset.json", flush=True)
+
         disk = disk_bytes_du(mod_cfg["deploy"]["disk_path"])
         slug = system.replace("/", "-")
         json.dump({"module": system, "run_id": run_id, **init_res,
