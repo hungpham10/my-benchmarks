@@ -63,6 +63,9 @@ jobs:
       BENCH_COMMIT: ${{ github.sha }}
 
     steps:
+      - name: Clean workspace
+        run: |
+          rm -rf ${{ github.workspace }}/benchctl 2>/dev/null || true
       - name: Check out
         uses: actions/checkout@v4
         with:
