@@ -100,8 +100,9 @@ jobs:
       - name: Install driver deps
         # The driver runs on the runner (not in a container): it generates
         # plan.json + compose and shells out to docker. numpy/cramjam build
-        # the dataset; pyyaml reads scenario + module files.
-        run: pip install numpy cramjam pyyaml
+        # the dataset; pyyaml reads scenario + module files; psycopg for
+        # postgres init.
+        run: pip install numpy cramjam pyyaml 'psycopg[binary]'
 
       - name: Run the benchmark
         # Start from an empty results/, not just missing files. A run that
