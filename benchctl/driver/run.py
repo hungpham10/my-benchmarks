@@ -202,7 +202,7 @@ def disk_bytes_du(path):
     return int(p.stdout.strip().split()[0])
 
 
-def start_monitoring(module):
+def start_monitoring(module_name):
     """Static stack, outside the measured envelope — or nothing at all.
 
     cAdvisor + Alloy pushing straight to Cloud. Skipped entirely when
@@ -216,7 +216,7 @@ def start_monitoring(module):
     sh("docker", "network", "create", "benchctl-mon", check=False)
     env = {
         "BENCH_RUN_ID": os.environ.get("BENCH_RUN_ID", "local"),
-        "BENCH_MODULE": module,
+        "BENCH_MODULE": module_name,
     }
     print("[benchctl] monitoring up (Cloud push)", flush=True)
     sh("docker", "compose", "-f", "monitoring/compose.monitoring.yml",
