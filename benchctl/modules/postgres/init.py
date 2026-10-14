@@ -20,29 +20,27 @@ import psycopg
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def _csv_rows(total, variant):
+def _csv_rows(total, variant, t_start_ms, interval_s):
     """Yield CSV rows for COPY into metrics_jsonb or metrics_norm_brin.
 
     metrics_jsonb: time (timestamptz), labels (jsonb), value (double precision)
     metrics_norm_brin: time (timestamptz), series_id (int), value (double precision)
     series_dim: id (identity), metric, job, instance, region, service
 
-    We generate evenly-spaced timestamps over a 45‑min window, 15‑s interval.
+    We generate evenly-spaced timestamps over the window, using the exact
+    timestamps from the dataset (t_start_ms to t_end_ms).
     """
     import math
     from datetime import datetime, timezone
-    interval_s = 15
-    window_min = 45
     n_series = 20  # fixed for smoke; the real count comes from dataset.json
     n_samples = total // n_series if total else 1200
     n_samples = max(1, n_samples)
-    start_ts = time.time() - window_min * 60
     rows = []
     for s in range(n_series):
         for i in range(n_samples):
-            ts = start_ts + i * interval_s
+            ts = t_start_ms + i * interval_s * 1000
             # Convert Unix timestamp to ISO format for PostgreSQL timestamptz
-            ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            ts_iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
             val = 100 + 50 * math.sin(i * 0.1 + s * 0.5)
             if variant == "norm":
                 # time, series_id, value
@@ -124,12 +122,14 @@ def init(ahead_minutes=8):
     total = 1200  # fallback smoke number
     t_start_ms = 0
     t_end_ms = 0
+    interval_s = 15
     if os.path.exists(ds_path):
         with open(ds_path) as f:
             m = json.load(f)
         total = m.get("total_samples", 1200)
         t_start_ms = m.get("t_start_ms", 0)
         t_end_ms = m.get("t_end_ms", 0)
+        interval_s = m.get("interval_seconds", 15)
 
     # ---- connect and ensure partitions --------------------------------------
     conn = psycopg.connect(dsn, autocommit=True)
@@ -137,7 +137,7 @@ def init(ahead_minutes=8):
     if t_start_ms and t_end_ms:
         ensure_partitions(cur, t_start_ms, t_end_ms)
 
-    rows = _csv_rows(total, variant)
+    rows = _csv_rows(total, variant, t_start_ms, interval_s)
 
     # COPY expects the column order matching the table.
     # metrics_jsonb: time, labels, value
