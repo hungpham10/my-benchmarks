@@ -50,9 +50,7 @@ jobs:
     # load-test is ~10 min + init + verify. Keep 120 for safety.
     timeout-minutes: 120
 
-    defaults:
-      run:
-        working-directory: benchctl
+    # No default working directory; steps specify their own
 
     permissions:
       contents: write
