@@ -1,6 +1,6 @@
 """modules/postgres/init.py — init(scale, shape): load the dataset.
 
-Uses psycopg2 COPY FROM STDIN to bulk-insert rows. The driver (run.py) sets
+Uses psycopg COPY FROM STDIN to bulk-insert rows. The driver (run.py) sets
 PG_DSN and VARIANT in the environment before calling this; dataset.json in
 results/ tells us exactly how many rows to insert.
 
@@ -20,7 +20,7 @@ import psycopg
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def _csv_rows(total, variant, t_start_ms, interval_s):
+def _csv_rows(total, variant, t_start_ms, interval_s, window_min):
     """Yield CSV rows for COPY into metrics_jsonb or metrics_norm_brin.
 
     metrics_jsonb: time (timestamptz), labels (jsonb), value (double precision)
@@ -32,9 +32,9 @@ def _csv_rows(total, variant, t_start_ms, interval_s):
     """
     import math
     from datetime import datetime, timezone
-    n_series = 20  # fixed for smoke; the real count comes from dataset.json
-    n_samples = total // n_series if total else 1200
-    n_samples = max(1, n_samples)
+    # n_samples_per_series = window_min * 60 / interval_s
+    n_samples = int(window_min * 60 / interval_s)
+    n_series = max(1, total // n_samples)
     rows = []
     for s in range(n_series):
         for i in range(n_samples):
@@ -86,15 +86,38 @@ def init(ahead_minutes=8):
         ))
 
     # ---- read total_samples from dataset.json -----------------------
-    results_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "results")
+    # Use RESULTS_DIR env var if set by driver, else compute from file location
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"))
     ds_path = os.path.join(results_dir, "dataset.json")
     total = 1200  # fallback smoke number
+    t_start_ms = 0
+    t_end_ms = 0
+    interval_s = 15
+    window_min = 45
     if os.path.exists(ds_path):
         with open(ds_path) as f:
             m = json.load(f)
         total = m.get("total_samples", 1200)
+        t_start_ms = m.get("t_start_ms", 0)
+        t_end_ms = m.get("t_end_ms", 0)
+        interval_s = m.get("interval_seconds", 15)
+        window_min = m.get("window_minutes", 45)
+        # Debug: print what we read
+        print(f"[init] read dataset: total={total}, t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}, window_min={window_min}", file=sys.stderr)
+    else:
+        print(f"[init] dataset.json not found at {ds_path}, using fallback", file=sys.stderr)
+
+    # Fallback: if dataset.json is missing or invalid, compute from scenario params
+    if t_start_ms == 0:
+        ahead_min = int(os.environ.get("AHEAD_MINUTES", "8"))
+        window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
+        interval_s = int(os.environ.get("INTERVAL_SECONDS", "15"))
+        now_ms = int(time.time() * 1000)
+        t_start_ms = int(time.time() * 1000) - (window_min - ahead_min) * 60 * 1000
+        t_end_ms = t_start_ms + window_min * 60 * 1000
+        print(f"[init] fallback timestamps: t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}, window_min={window_min}", file=sys.stderr)
 
     # ---- decide variant ---------------------------------------------
     variant = os.environ.get("VARIANT", "jsonb")  # overridden per-leg
@@ -114,45 +137,16 @@ def init(ahead_minutes=8):
                     (table, day_str)
                 )
 
-    # ---- read total_samples from dataset.json -----------------------
-    # Use RESULTS_DIR env var if set by driver, else compute from file location
-    results_dir = os.environ.get(
-        "RESULTS_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"))
-    ds_path = os.path.join(results_dir, "dataset.json")
-    total = 1200  # fallback smoke number
-    t_start_ms = 0
-    t_end_ms = 0
-    interval_s = 15
-    if os.path.exists(ds_path):
-        with open(ds_path) as f:
-            m = json.load(f)
-        total = m.get("total_samples", 1200)
-        t_start_ms = m.get("t_start_ms", 0)
-        t_end_ms = m.get("t_end_ms", 0)
-        interval_s = m.get("interval_seconds", 15)
-        # Debug: print what we read
-        print(f"[init] read dataset: total={total}, t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}", file=sys.stderr)
-    else:
-        print(f"[init] dataset.json not found at {ds_path}, using fallback", file=sys.stderr)
-
-    # Fallback: if dataset.json is missing or invalid, compute from scenario params
-    if t_start_ms == 0:
-        ahead_min = int(os.environ.get("AHEAD_MINUTES", "8"))
-        window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
-        interval_s = int(os.environ.get("INTERVAL_SECONDS", "15"))
-        now_ms = int(time.time() * 1000)
-        t_start_ms = int(time.time() * 1000) - (window_min - ahead_min) * 60 * 1000
-        t_end_ms = t_start_ms + window_min * 60 * 1000
-        print(f"[init] fallback timestamps: t_start_ms={t_start_ms}, t_end_ms={t_end_ms}, interval_s={interval_s}", file=sys.stderr)
-
     # ---- connect and ensure partitions --------------------------------------
     conn = psycopg.connect(dsn, autocommit=True)
     cur = conn.cursor()
     if t_start_ms and t_end_ms:
         ensure_partitions(cur, t_start_ms, t_end_ms)
 
-    rows = _csv_rows(total, variant, t_start_ms, interval_s)
+    # Generate rows using timestamps from dataset.json
+    window_min = int(os.environ.get("WINDOW_MINUTES", "45"))
+    interval_s = int(os.environ.get("INTERVAL_SECONDS", "15"))
+    rows = _csv_rows(total, variant, t_start_ms, interval_s, window_min)
 
     # COPY expects the column order matching the table.
     # metrics_jsonb: time, labels, value
