@@ -154,6 +154,10 @@ def gen_compose(module, cfg, mod_cfg):
         "K6_PROMETHEUS_RW_PASSWORD": cfg["cloud"]["password"],
         "K6_PROMETHEUS_RW_FLUSH_INTERVAL": "3s",
     }
+    # Pass the rendered query as an environment variable for reliability
+    query = render_query(system, scenario)
+    if isinstance(query, str):
+        k6env["K6_QUERY"] = query
     for k, v in k6cfg.get("env", {}).items():
         k6env[k] = expand(v)
     k6svc = {

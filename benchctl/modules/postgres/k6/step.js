@@ -5,7 +5,7 @@ import sql from 'k6/x/sql';
 import { check } from 'k6';
 
 const plan = JSON.parse(open('../../../plan.json'));
-const QUERY = plan.query;  // rendered SQL from scenario
+const QUERY = __ENV.K6_QUERY || plan.query;  // rendered SQL from scenario
 const PG_DSN = __ENV.PG_DSN || 'postgres://bench:bench@sut:5432/bench?sslmode=disable';
 
 let conn;
