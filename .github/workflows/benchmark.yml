@@ -67,6 +67,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
 
       - name: Report runner capacity
         # The envelope is only meaningful if the machine can honour it. Fail
