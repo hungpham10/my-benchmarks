@@ -23,8 +23,10 @@ import psycopg
 def _csv_rows(total, variant):
     """Yield CSV rows for COPY into metrics_jsonb or metrics_norm_brin.
 
-    Both tables have columns: metric (text), value (float8), time (timestamptz)
-    and optionally series_id (bigint) for the norm design.
+    metrics_jsonb: time (timestamptz), labels (jsonb), value (double precision)
+    metrics_norm_brin: time (timestamptz), series_id (int), value (double precision)
+    series_dim: id (identity), metric, job, instance, region, service
+
     We generate evenly-spaced timestamps over a 45‑min window, 15‑s interval.
     """
     import math
@@ -39,12 +41,13 @@ def _csv_rows(total, variant):
         for i in range(n_samples):
             ts = start_ts + i * interval_s
             val = 100 + 50 * math.sin(i * 0.1 + s * 0.5)
-            metric = "queue_depth"
             if variant == "norm":
-                rows.append((metric, val, ts, 0))
+                # time, series_id, value
+                rows.append((ts, 0, val))
             else:
+                # time, labels, value
                 lbls = '{"__name__":"queue_depth"}'
-                rows.append((metric, val, ts, lbls))
+                rows.append((ts, lbls, val))
     return rows
 
 
@@ -102,12 +105,14 @@ def init(ahead_minutes=8):
     rows = _csv_rows(total, variant)
 
     # COPY expects the column order matching the table.
-    # Both tables have: metric (text), value (float8), time (timestamptz)
-    # plus series_id (bigint) for norm.
+    # metrics_jsonb: time, labels, value
+    # metrics_norm_brin: time, series_id, value
     if variant == "norm":
-        cols = ["metric", "value", "time", "series_id"]
+        cols = ["time", "series_id", "value"]
+        table = "metrics_norm_brin"
     else:
-        cols = ["metric", "value", "time", "labels"]
+        cols = ["time", "labels", "value"]
+        table = "metrics_jsonb"
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -116,7 +121,7 @@ def init(ahead_minutes=8):
         writer.writerow(r)
     buf.seek(0)
     # psycopg v3 uses copy() not copy_from()
-    with cur.copy(f"COPY metrics_{variant} ({', '.join(cols)}) FROM STDIN WITH (FORMAT CSV, HEADER)") as copy:
+    with cur.copy(f"COPY {table} ({', '.join(cols)}) FROM STDIN WITH (FORMAT CSV, HEADER)") as copy:
         copy.write(buf.read())
     conn.commit()
     cur.close()
