@@ -151,6 +151,7 @@ def gen_compose(module, cfg, mod_cfg):
         "K6_PROMETHEUS_RW_SERVER_URL": cfg["cloud"]["remote_write_url"],
         "K6_PROMETHEUS_RW_USERNAME": cfg["cloud"]["username"],
         "K6_PROMETHEUS_RW_PASSWORD": cfg["cloud"]["password"],
+        "K6_PROMETHEUS_RW_FLUSH_INTERVAL": "3s",
     }
     for k, v in k6cfg.get("env", {}).items():
         k6env[k] = expand(v)
