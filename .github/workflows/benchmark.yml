@@ -28,7 +28,7 @@ on:
       scale:
         description: Benchmark scale
         type: choice
-        options: [smoke, load, full]
+        options: [smoke, load, pg, full]
         default: full
       publish:
         description: Open a PR with the results
@@ -89,6 +89,9 @@ jobs:
           elif [ "${{ inputs.scale }}" = "load" ]; then
             echo 'SCENARIO=scenarios/load-test.yaml' >> "$GITHUB_ENV"
             echo "load-test (dispatch)"
+          elif [ "${{ inputs.scale }}" = "pg" ]; then
+            echo 'SCENARIO=scenarios/load-test-pg.yaml' >> "$GITHUB_ENV"
+            echo "load-test-pg (dispatch)"
           else
             echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
             echo "full"
