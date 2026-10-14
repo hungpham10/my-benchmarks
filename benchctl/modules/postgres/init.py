@@ -115,8 +115,9 @@ def init(ahead_minutes=8):
     for r in rows:
         writer.writerow(r)
     buf.seek(0)
-    # copy_from: file-like object, table name, columns list
-    cur.copy_from(buf, "metrics_" + variant, columns=cols)
+    # psycopg v3 uses copy() not copy_from()
+    with cur.copy(f"COPY metrics_{variant} ({', '.join(cols)}) FROM STDIN WITH (FORMAT CSV, HEADER)") as copy:
+        copy.write(buf.read())
     conn.commit()
     cur.close()
     conn.close()
