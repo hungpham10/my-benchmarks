@@ -20,7 +20,7 @@ import psycopg
 # ------------------------------------------------------------------
 # Use shared generator (same as Prometheus)
 # ------------------------------------------------------------------
-SHARED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared")
+SHARED = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "shared")
 sys.path.insert(0, SHARED)
 import dataset as d
 import values as v
