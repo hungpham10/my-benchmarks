@@ -5,7 +5,9 @@
 // are taken ONLY from the entry script (ramp.js), so setup() in this module
 // never fires. Even if it did, init context ≠ VU context, so module-level
 // `conn` set in setup() is a different instance from the one seen in step().
+// xk6-sql requires the driver OBJECT, not a string name.
 import sql from 'k6/x/sql';
+import pgDriver from 'k6/x/sql/driver/postgres';
 import { check } from 'k6';
 
 const plan = JSON.parse(open('../../../plan.json'));
@@ -16,7 +18,7 @@ let conn;
 
 export function step() {
   if (conn === undefined) {
-    conn = sql.open('postgres', PG_DSN);
+    conn = sql.open(pgDriver, PG_DSN);
   }
   const result = conn.query(QUERY);
   check(result, { 'query ok': (r) => r.length >= 0 });
