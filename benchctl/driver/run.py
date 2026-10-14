@@ -257,6 +257,9 @@ def main():
     run_id = cfg["run"]["run_id"]
     ds = scenario["dataset"]
 
+    # Debug: print version
+    print(f"[benchctl] VERSION: 20241014-02", flush=True)
+
     # Build k6 image ONCE for all systems (shared image with xk6-sql)
     build_k6_image()
 
