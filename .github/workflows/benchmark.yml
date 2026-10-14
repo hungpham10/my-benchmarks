@@ -68,6 +68,12 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Verify checkout
+        run: |
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Current branch: $(git branch --show-current)"
+          echo "Files in benchctl/driver/: $(ls benchctl/driver/)"
+          head -20 benchctl/driver/run.py | tail -10
 
       - name: Report runner capacity
         # The envelope is only meaningful if the machine can honour it. Fail
