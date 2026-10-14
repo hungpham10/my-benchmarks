@@ -248,13 +248,15 @@ def main():
     run_id = cfg["run"]["run_id"]
     ds = scenario["dataset"]
 
+    # Start monitoring ONCE for the entire run (shared across all systems)
+    monitoring_started = start_monitoring(scenario["systems"][0])
+
     for system in scenario["systems"]:
         module, variant = split_system(system)
         mod_cfg = yaml.safe_load(
             open(os.path.join(ROOT, "modules", module, "module.yaml")))
         print(f"[benchctl] === {system} ===", flush=True)
 
-        start_monitoring(system)
         build_k6_image(module, mod_cfg)
 
         plan = gen_plan(system, scenario, cfg, mod_cfg)
@@ -294,6 +296,7 @@ def main():
             "WINDOW_MINUTES": str(ds["window_minutes"]),
             "VARIANT": variant or "",
             "QUERY_MARKER": mod_cfg.get("query_marker", ""),
+            "RESULTS_DIR": RESULTS,
         }
         out = subprocess.run(
             [sys.executable, f"modules/{module}/init.py"],
@@ -354,9 +357,11 @@ def main():
                                 "w"), indent=1)
 
         sh("docker", "compose", "-f", "docker-compose.gen.yml", "down", "-v")
-        print(f"[benchctl] === {system} done === "
-              "(monitoring stays up: verify reads it, `make down` stops it) ===",
-              flush=True)
+        print(f"[benchctl] === {system} done ===", flush=True)
+
+    if monitoring_started:
+        stop_monitoring()
+        print("[benchctl] monitoring stopped", flush=True)
 
 
 if __name__ == "__main__":
