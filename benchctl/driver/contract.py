@@ -10,12 +10,14 @@ Every module must provide these 5 functions:
 And module.yaml must have these keys:
   - name
   - image
-  - deploy: {command, config_files, data_volume, ports, healthcheck, endpoint, disk_path}
+  - deploy: {command, data_volume, endpoint, disk_path}
+    (config_files, ports, environment, healthcheck are optional)
   - k6: {image|dockerfile, env}
   - query_marker (for server_requests filter)
   - requests_module (for server-side request count)
 """
 
+import ast
 import os
 import sys
 import yaml
@@ -33,15 +35,21 @@ REQUIRED_YAML_KEYS = [
     "requests_module",
 ]
 
+# gen_compose indexes deploy["command"] unconditionally. The other keys
+# are guarded with .get() or `if <container>:`, so a module may
+# legitimately omit them (e.g. Prometheus needs no environment).
 REQUIRED_DEPLOY_KEYS = [
     "command",
-    "config_files",
     "data_volume",
+    "endpoint",
+    "disk_path",
+]
+
+OPTIONAL_DEPLOY_KEYS = [
+    "config_files",
     "ports",
     "environment",
     "healthcheck",
-    "endpoint",
-    "disk_path",
 ]
 
 REQUIRED_K6_KEYS = [
@@ -74,6 +82,10 @@ def check_yaml(module):
         for key in REQUIRED_DEPLOY_KEYS:
             if key not in m["deploy"]:
                 errors.append(f"deploy missing key: {key}")
+        # Warn about optional keys that are missing (for doc completeness)
+        for key in OPTIONAL_DEPLOY_KEYS:
+            if key not in m["deploy"]:
+                pass  # silent; modules don't need these
 
     if "k6" in m:
         for key in REQUIRED_K6_KEYS:
@@ -89,25 +101,40 @@ def check_yaml(module):
     return errors
 
 
+def _functions_defined_in(path):
+    """Return set of top-level function names defined in a Python file."""
+    try:
+        with open(path) as f:
+            tree = ast.parse(f.read())
+    except Exception as e:
+        return {f"<parse error: {e}>"}
+    funcs = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.add(node.name)
+    return funcs
+
+
 def check_python_module(module):
     """Check Python module has required functions."""
     errors = []
-    # The module Python file is at modules/{module}/init.py
-    # but we check for the required functions in the module's Python files
     init_path = os.path.join(MODULES_DIR, module, "init.py")
     requests_path = os.path.join(MODULES_DIR, module, "requests.py")
 
-    # Check init.py exists
     if not os.path.exists(init_path):
         errors.append(f"missing {init_path}")
     else:
-        # Could add function signature check here
-        pass
+        funcs = _functions_defined_in(init_path)
+        if "init" not in funcs:
+            errors.append(f"init.py missing required function: init")
 
     if not os.path.exists(requests_path):
         errors.append(f"missing {requests_path}")
     else:
-        pass
+        funcs = _functions_defined_in(requests_path)
+        # requests.py exposes server_requests() for the driver
+        if "server_requests" not in funcs:
+            errors.append(f"requests.py missing required function: server_requests")
 
     return errors
 
