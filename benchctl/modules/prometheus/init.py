@@ -24,15 +24,23 @@ SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "1000"))
 SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "240"))
 
 
-def t_start_ms(ahead_minutes=8):
-    now = int(time.time() * 1000)
-    return now - (d.WINDOW_MINUTES - ahead_minutes) * 60 * 1000
+def _read_dataset_timestamps():
+    """Read t_start_ms from dataset.json (written by driver before any init)."""
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
+    ds_path = os.path.join(results_dir, "dataset.json")
+    if not os.path.exists(ds_path):
+        raise RuntimeError(f"dataset.json not found at {ds_path} - driver must write it before init")
+    with open(ds_path) as f:
+        m = json.load(f)
+    return m["t_start_ms"], m["t_end_ms"]
 
 
 def init(ahead_minutes=8):
     series = d.build_series()
-    start = t_start_ms(ahead_minutes)
-    timestamps = v.generate_timestamps(start)
+    t_start_ms, t_end_ms = _read_dataset_timestamps()
+    timestamps = v.generate_timestamps(t_start_ms)
     parsed = urlparse(PROM_URL)
     conn = http.client.HTTPConnection(
         parsed.hostname or "localhost", parsed.port or 80, timeout=300)
@@ -69,9 +77,17 @@ def init(ahead_minutes=8):
 
 def stop_load():
     import urllib.request
+    # Use window_minutes from dataset.json for the query
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
+    ds_path = os.path.join(results_dir, "dataset.json")
+    window_min = 45
+    if os.path.exists(ds_path):
+        with open(ds_path) as f:
+            window_min = json.load(f).get("window_minutes", 45)
     with urllib.request.urlopen(
-            PROM_URL + "/api/v1/query?query=count(count_over_time"
-            "(http_requests_total[45m]))", timeout=60) as r:
+            PROM_URL + f"/api/v1/query?query=count(count_over_time(http_requests_total[{window_min}m]))", timeout=60) as r:
         data = json.load(r)
     return {"series_present": int(data["data"]["result"][0]["value"][1])}
 

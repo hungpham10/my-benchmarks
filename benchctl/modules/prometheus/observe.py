@@ -37,13 +37,26 @@ def server_requests():
     return {"server_requests": total}
 
 
+def _read_window_minutes():
+    """Read window_minutes from dataset.json."""
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
+    ds_path = os.path.join(results_dir, "dataset.json")
+    if os.path.exists(ds_path):
+        with open(ds_path) as f:
+            return json.load(f).get("window_minutes", 45)
+    return 45
+
+
 def sample_stats():
     """Return {'samples': count, 'sum': value} from Prometheus query API.
 
-    Uses count_over_time + sum over the 45m window matching the dataset.
+    Uses count_over_time + sum over the window from dataset.json.
     """
-    # count_over_time over the window used in dataset (45m)
-    q = f"sum(count_over_time(http_requests_total[45m]))"
+    window_min = _read_window_minutes()
+    # count_over_time over the window used in dataset
+    q = f"sum(count_over_time(http_requests_total[{window_min}m]))"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     with urllib.request.urlopen(url_q, timeout=30) as r:
         data = json.load(r)
