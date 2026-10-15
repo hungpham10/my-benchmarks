@@ -1,10 +1,9 @@
 // modules/postgres/k6/step.js — one SQL query via xk6-sql.
 // The driver symlinks modules/active -> the current module before the run,
 // so this import path is fixed regardless of which module is active.
-// Connection is opened lazily per-VU because k6 lifecycle hooks (setup/teardown)
-// are taken ONLY from the entry script (ramp.js), so setup() in this module
-// never fires. Even if it did, init context ≠ VU context, so module-level
-// `conn` set in setup() is a different instance from the one seen in step().
+// Uses a connection POOL (not per-VU connection) to bound resource usage.
+// Pool is created lazily in VU context; lifecycle hooks from this module
+// are ignored because k6 only takes setup/teardown from the entry script (ramp.js).
 // xk6-sql requires the driver OBJECT, not a string name.
 import sql from 'k6/x/sql';
 import pgDriver from 'k6/x/sql/driver/postgres';
@@ -13,18 +12,19 @@ import { check } from 'k6';
 const plan = JSON.parse(open('../../../plan.json'));
 const QUERY = __ENV.K6_QUERY || plan.query;  // rendered SQL from scenario
 const PG_DSN = __ENV.PG_DSN || 'postgres://bench:bench@sut:5432/bench?sslmode=disable';
+const MAX_CONN = parseInt(__ENV.PG_MAX_CONN || '32', 10);
 
-let conn;
+let pool;
 
 export function step() {
-  if (conn === undefined) {
-    conn = sql.open(pgDriver, PG_DSN);
+  if (pool === undefined) {
+    pool = sql.pool(pgDriver, PG_DSN, MAX_CONN);
   }
-  const result = conn.query(QUERY);
+  const result = pool.query(QUERY);
   check(result, { 'query ok': (r) => r.length >= 0 });
   return true;
 }
 
 export function teardown(data) {
-  if (conn) conn.close();
+  if (pool) pool.close();
 }

@@ -166,6 +166,9 @@ def gen_compose(module, cfg, mod_cfg, system, scenario):
         "K6_PROMETHEUS_RW_PASSWORD": cfg["cloud"]["password"],
         "K6_PROMETHEUS_RW_FLUSH_INTERVAL": "3s",
     }
+    # Pool size for postgres modules (env var consumed by step.js)
+    if module == "postgres":
+        k6env["PG_MAX_CONN"] = "32"
     # Pass the rendered query as an environment variable for reliability
     query = render_query(system, scenario)
     if isinstance(query, str):
@@ -395,6 +398,23 @@ def main():
                "/scripts/ramp.js", check=False)
         print(f"[benchctl] k6 exit: {r.returncode} (99 = threshold broke: "
               "that IS the breaking point)", flush=True)
+        # Check SUT container for OOM/exit info
+        try:
+            inspect = subprocess.run(
+                ["docker", "inspect", "benchctl-sut"],
+                capture_output=True, text=True, check=False)
+            if inspect.returncode == 0:
+                import json as _json
+                info = _json.loads(inspect.stdout)[0]
+                state = info.get("State", {})
+                payload["oom_killed"] = state.get("OOMKilled", False)
+                payload["exit_code"] = state.get("ExitCode", None)
+                if state.get("OOMKilled"):
+                    print("[benchctl] WARNING: SUT was OOM-killed!", flush=True)
+                if state.get("ExitCode") not in (0, None):
+                    print(f"[benchctl] WARNING: SUT exited with code {state.get('ExitCode')}", flush=True)
+        except Exception:
+            pass
         server_n = server_count() - before
         print(f"[benchctl] server handled {server_n} queries "
               "during the leg", flush=True)
