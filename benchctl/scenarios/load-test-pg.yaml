@@ -24,7 +24,7 @@ timeout_min: 15
 
 dataset:
   jobs: 2
-  instances_per_job: 500
+  instances_per_job: 400
   interval_seconds: 15
   window_minutes: 45
   ahead_minutes: 8
