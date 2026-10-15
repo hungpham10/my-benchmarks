@@ -439,6 +439,7 @@ def main():
 
     # Render report
     print("[benchctl] rendering report...", flush=True)
+    sys.path.insert(0, os.path.dirname(ROOT))  # benchctl/
     from report.render import main as report_main
     report_main()
     print("[benchctl] report written", flush=True)
