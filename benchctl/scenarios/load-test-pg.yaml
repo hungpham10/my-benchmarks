@@ -8,6 +8,7 @@ load:
   executor: ramping-arrival-rate
   start_rate: 10
   time_unit: 1s
+  maxVUs: 32
   stages:
     - { target: 10,  duration: 1m }
     - { target: 50,  duration: 2m }
