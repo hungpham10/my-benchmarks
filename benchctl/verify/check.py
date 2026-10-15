@@ -21,76 +21,23 @@ import queries as Q
 
 
 def check_parity():
-    """Real parity: query each system for actual sample count and sum.
+    """Real parity: compare sample stats collected from each system at init time.
 
-    This verifies both systems actually hold the same data by querying
-    each system directly, not just trusting self-reported sample counts.
+    This verifies both systems actually hold the same data by reading the
+    stats-<system>.json files written by the driver while the SUT was live.
+    No network connections, no dependency on teardown order.
     """
-    import urllib.request
-    import urllib.parse
-    import subprocess
-
-    files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
-    if len(files) < 2:
+    stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
+    if len(stats_files) < 2:
         # Skip parity check for single-system runs (e.g. smoke scenario)
-        return True, f"parity skipped: only {len(files)} system(s), need >=2"
+        return True, f"parity skipped: only {len(stats_files)} system(s), need >=2"
 
     module_stats = {}
-    for f in files:
-        disk = json.load(open(os.path.join(RESULTS, f)))
-        module = disk["module"]
-        variant = disk.get("variant", "")
-        slug = f"disk-{module.replace('/', '-')}.json"
-
-        # Get stats from each system
-        if module == "prometheus":
-            # Query Prometheus for count and sum
-            url = "http://localhost:19090/api/v1/query"
-            q = f"sum(count_over_time(http_requests_total[45m]))"
-            url_q = url + "?query=" + urllib.parse.quote(q)
-            with urllib.request.urlopen(url_q, timeout=30) as r:
-                data = json.load(r)
-            res = data["data"]["result"]
-            count = int(float(res[0]["value"][1])) if res else 0
-
-            q = f"sum(http_requests_total)"
-            url_q = url + "?query=" + urllib.parse.quote(q)
-            with urllib.request.urlopen(url_q, timeout=30) as r:
-                data = json.load(r)
-            res = data["data"]["result"]
-            sum_val = float(res[0]["value"][1]) if res else 0.0
-
-        else:
-            # Postgres: query via psycopg
-            dsn = os.environ.get("PG_DSN")
-            if not dsn:
-                dsn = "postgres://bench:bench@localhost:15432/bench?sslmode=disable"
-            # Use the same DSN rewrite as requests.py
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(dsn)
-            port = os.environ.get("PG_PORT", "15432")
-            netloc = f"{parsed.username}:{parsed.password}@localhost:{os.environ.get('PG_PORT', '15432')}" if parsed.username else f"localhost:{os.environ.get('PG_PORT', '15432')}"
-            dsn = urlunparse((
-                parsed.scheme,
-                netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment
-            ))
-
-            import psycopg
-            conn = psycopg.connect(dsn, autocommit=True)
-            cur = conn.cursor()
-
-            variant = "norm" if "norm" in system else "jsonb"
-            table = "metrics_norm_brin" if variant == "norm" else "metrics_jsonb"
-
-            cur.execute(f"SELECT count(*), sum(value) FROM {table}")
-            count, sum_val = cur.fetchone()
-            sum_val = float(sum_val) if sum_val else 0.0
-            cur.close()
-            count = int(count) if count else 0
+    for f in stats_files:
+        stats = json.load(open(os.path.join(RESULTS, f)))
+        module = stats["module"]
+        count = stats["samples"]
+        sum_val = stats["sum"]
 
         module_stats[module] = {"count": count, "sum": sum_val}
         print(f"[parity] {module}: count={count}, sum={sum_val}")

@@ -47,8 +47,8 @@ k6:
   env:
     PROM_URL: "http://sut:9090"
 
-# Server-side request accounting: /metrics parsed directly (requests.py),
+# Server-side request accounting: /metrics parsed directly (observe.py),
 # because the SUT does not scrape itself and its own query API cannot see
 # its self-metrics at all.
 query_marker: "/api/v1/query"
-requests_module: "modules/prometheus/requests.py"
+requests_module: "modules/prometheus/observe.py"

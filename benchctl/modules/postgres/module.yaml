@@ -60,15 +60,14 @@ k6:
   env:
     PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
 
-# Server-side request accounting.
-# The driver (run.py) reads pg_stat_statements via modules/postgres/requests.py.
+# Server-side request accounting + sample stats.
+# The driver (run.py) reads pg_stat_statements and data tables via
+# modules/postgres/observe.py.
 # query_marker is a SQL fragment that the verify check uses to narrow the
 # count to only the bench's queries (so we don't count VACUUM, PL/pgSQL,
 # or unrelated ad-hoc queries). For postgres, we filter by the table name
 # that appears in the rendered SQL.
 query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%'"
 
-# requests.py lives at modules/postgres/requests.py and exposes
-# server_requests(filter_sql) -> int. The driver calls it before/after k6
-# and stores the delta in disk-<slug>.json as server_requests.
-requests_module: modules/postgres/requests.py
+# observe.py exposes server_requests(filter_sql) and sample_stats(variant).
+requests_module: modules/postgres/observe.py

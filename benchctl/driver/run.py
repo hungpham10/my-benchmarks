@@ -378,6 +378,23 @@ def main():
         print(f"[benchctl] disk: {disk} B "
               f"({disk / init_res['samples']:.2f} B/sample)", flush=True)
 
+        # Sample stats for parity (collected while SUT is still up)
+        print("[benchctl] collecting sample stats for parity...", flush=True)
+        stats_env = {**init_env}
+        if module == "postgres":
+            stats_env["VARIANT"] = variant
+        out = subprocess.run(
+            [sys.executable, f"modules/{module}/observe.py", "stats"],
+            cwd=ROOT, env={**os.environ, **stats_env},
+            capture_output=True, text=True)
+        if out.returncode != 0:
+            print(out.stderr[-2000:])
+            raise RuntimeError("sample stats failed")
+        stats = json.loads(out.stdout.strip().splitlines()[-1])
+        json.dump({"module": system, "run_id": run_id, **stats},
+                  open(os.path.join(RESULTS, f"stats-{slug}.json"), "w"), indent=1)
+        print(f"[benchctl] parity stats: {stats}", flush=True)
+
         print("[benchctl] k6 ramp", flush=True)
         # The k6 image runs as its own uid, which is not the runner's uid on
         # Linux (Docker Desktop on macOS masks this). Without world-writable
@@ -394,8 +411,9 @@ def main():
             server, and counting them as bench traffic would be dishonest.
             """
             out = subprocess.run(
-                [sys.executable, f"modules/{module}/requests.py"],
-                cwd=ROOT, env={**os.environ, **init_env},
+                [sys.executable, f"modules/{module}/observe.py"],
+                cwd=ROOT, env={**os.environ, **init_env,
+                               "QUERY_MARKER": mod_cfg.get("query_marker", "")},
                 capture_output=True, text=True)
             if out.returncode != 0:
                 print(out.stderr[-2000:])
