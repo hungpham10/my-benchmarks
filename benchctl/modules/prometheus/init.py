@@ -20,8 +20,10 @@ import values as v
 import protobuf as p
 
 PROM_URL = os.environ.get("SUT_URL", "http://localhost:19090")
-SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "1000"))
-SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "240"))
+SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "500"))
+SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "120"))
+# Delay between requests to avoid overwhelming Prometheus WAL (seconds)
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "0.1"))
 
 
 def _read_dataset_timestamps():
@@ -79,6 +81,9 @@ def init(ahead_minutes=8):
                 break
             sent += len(chunk) * window.size
             reqs += 1
+            # Small delay to avoid overwhelming Prometheus WAL
+            if REQUEST_DELAY > 0:
+                time.sleep(REQUEST_DELAY)
     conn.close()
     elapsed = time.monotonic() - t0
     return {"samples": sent, "seconds": round(elapsed, 1),
