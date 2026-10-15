@@ -122,7 +122,8 @@ def check_module(module):
 
 def main():
     modules = [d for d in os.listdir(MODULES_DIR)
-               if os.path.isdir(os.path.join(MODULES_DIR, d))]
+               if os.path.isdir(os.path.join(MODULES_DIR, d))
+               and not os.path.islink(os.path.join(MODULES_DIR, d))]
 
     if not modules:
         print("[contract] No modules found")
