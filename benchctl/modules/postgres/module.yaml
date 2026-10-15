@@ -56,6 +56,7 @@ deploy:
 
 k6:
   # Uses shared benchctl-k6 image (built once with xk6-sql + postgres driver)
+  max_vus: 32
   env:
     PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
 

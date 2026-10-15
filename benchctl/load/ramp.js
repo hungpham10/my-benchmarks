@@ -20,6 +20,12 @@ import { step } from '../modules/active/k6/step.js';
 
 const latency = new Trend('step_latency_ms', true);
 
+// maxVUs bounds client-side concurrency. It is a resource-envelope decision
+// (benchctl.yaml k6_max_vus), not a module's business. A module may lower it
+// via k6.max_vus. Framework caps preAllocatedVUs to not exceed maxVUs.
+const maxVUs = plan.load.max_vus ?? 500;
+const preAllocatedVUs = Math.min(50, maxVUs);
+
 export const options = {
   scenarios: {
     ramp: {
@@ -27,8 +33,8 @@ export const options = {
       startRate: plan.load.start_rate,
       timeUnit: plan.load.time_unit,
       stages: plan.load.stages.map((s) => ({ target: s.target, duration: s.duration })),
-      preAllocatedVUs: 50,
-      maxVUs: 500,
+      preAllocatedVUs: preAllocatedVUs,
+      maxVUs: maxVUs,
     },
   },
   thresholds: {

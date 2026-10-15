@@ -116,10 +116,21 @@ def render_query(system, scenario):
 
 
 def gen_plan(system, scenario, cfg, mod_cfg):
+    # maxVUs bounds client-side concurrency. It is a resource-envelope decision
+    # (benchctl.yaml k6_max_vus), not a module's business. A module may lower it
+    # via k6.max_vus. Framework passes the final value to plan.load.max_vus.
+    load = dict(scenario["load"])
+    env_max_vus = cfg["envelope"].get("k6_max_vus", 500)
+    mod_max_vus = mod_cfg.get("k6", {}).get("max_vus")
+    if mod_max_vus is not None:
+        load["max_vus"] = min(env_max_vus, mod_max_vus)
+    else:
+        load["max_vus"] = env_max_vus
+
     return {
         "scenario": scenario["id"],
         "system": system,
-        "load": scenario["load"],
+        "load": load,
         "thresholds": scenario["thresholds"],
         "query": render_query(system, scenario),
         "query_marker": mod_cfg.get("query_marker", ""),

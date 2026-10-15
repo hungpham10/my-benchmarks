@@ -5,6 +5,7 @@ envelope:
   memory: 4G
   k6_cpus: "1"
   k6_memory: 1G
+  k6_max_vus: 500
 
 # Grafana Cloud: every metric from every module carries module + run_id.
 # The framework never merges numbers itself; Cloud holds the curves.
