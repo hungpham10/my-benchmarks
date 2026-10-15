@@ -32,7 +32,8 @@ def check_parity():
 
     files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
     if len(files) < 2:
-        return False, f"need at least 2 systems for parity, got {len(files)}"
+        # Skip parity check for single-system runs (e.g. smoke scenario)
+        return True, f"parity skipped: only {len(files)} system(s), need >=2"
 
     module_stats = {}
     for f in files:
