@@ -23,7 +23,7 @@ PROM_URL = os.environ.get("SUT_URL", "http://localhost:19090")
 SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "200"))
 SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "60"))
 # Delay between requests to avoid overwhelming Prometheus WAL (seconds)
-REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "2.0"))
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "4.0"))
 
 
 def _read_dataset_timestamps():
@@ -40,7 +40,9 @@ def _read_dataset_timestamps():
 
 
 def init(ahead_minutes=8):
-    series = d.build_series()
+    # Only ingest counter metric (http_requests_total) to match Postgres
+    all_series = d.build_series()
+    series = [s for s in all_series if d.is_counter(s)]
     t_start_ms, t_end_ms = _read_dataset_timestamps()
     timestamps = v.generate_timestamps(t_start_ms)
     parsed = urlparse(PROM_URL)
