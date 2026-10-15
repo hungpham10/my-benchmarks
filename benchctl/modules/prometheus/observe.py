@@ -37,16 +37,17 @@ def server_requests():
     return {"server_requests": total}
 
 
-def _read_window_minutes():
-    """Read window_minutes from dataset.json."""
+def _read_dataset():
+    """Read dataset.json and return (window_minutes, t_end_ms)."""
     results_dir = os.environ.get(
         "RESULTS_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
     ds_path = os.path.join(results_dir, "dataset.json")
     if os.path.exists(ds_path):
         with open(ds_path) as f:
-            return json.load(f).get("window_minutes", 45)
-    return 45
+            m = json.load(f)
+            return m.get("window_minutes", 45), m.get("t_end_ms", 0)
+    return 45, 0
 
 
 def sample_stats():
@@ -55,18 +56,22 @@ def sample_stats():
     - samples: count of http_requests_total samples over the window
     - sum: sum of last value per series (counter state at window end)
     """
-    window_min = _read_window_minutes()
-    # Count of samples
+    window_min, t_end_ms = _read_dataset()
+    # Count of samples - use range query at t_end_ms to capture full window
     q = f"sum(count_over_time(http_requests_total[{window_min}m]))"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
+    if t_end_ms:
+        url_q += f"&time={t_end_ms / 1000}"
     with urllib.request.urlopen(url_q, timeout=30) as r:
         data = json.load(r)
     res = data["data"]["result"]
     count = int(float(res[0]["value"][1])) if res else 0
 
-    # Sum of last value per series (counter end state)
+    # Sum of last value per series (counter end state) - evaluate at t_end_ms
     q = f"sum(http_requests_total)"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
+    if t_end_ms:
+        url_q += f"&time={t_end_ms / 1000}"
     with urllib.request.urlopen(url_q, timeout=30) as r:
         data = json.load(r)
     res = data["data"]["result"]
