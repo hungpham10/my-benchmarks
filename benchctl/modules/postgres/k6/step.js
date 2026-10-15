@@ -5,6 +5,7 @@
 // Pool is created lazily in VU context; lifecycle hooks from this module
 // are ignored because k6 only takes setup/teardown from the entry script (ramp.js).
 // xk6-sql requires the driver OBJECT, not a string name.
+// Pool is created via sql.open with { maxOpenConns } option.
 import sql from 'k6/x/sql';
 import pgDriver from 'k6/x/sql/driver/postgres';
 import { check } from 'k6';
@@ -18,7 +19,7 @@ let pool;
 
 export function step() {
   if (pool === undefined) {
-    pool = sql.pool(pgDriver, PG_DSN, MAX_CONN);
+    pool = sql.open(pgDriver, PG_DSN, { maxOpenConns: MAX_CONN });
   }
   const result = pool.query(QUERY);
   check(result, { 'query ok': (r) => r.length >= 0 });
