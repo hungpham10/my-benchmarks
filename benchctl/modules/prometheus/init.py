@@ -57,15 +57,26 @@ def init(ahead_minutes=8):
                     d.labels_of(desc),
                     [(block[r][i], int(window[i])) for i in range(window.size)])
                 for r, desc in enumerate(chunk)]
-            conn.request("POST", "/api/v1/write",
-                         p.snappy_compress(p.encode_write_request(batch)),
-                         {"Content-Type": "application/x-protobuf",
-                          "Content-Encoding": "snappy",
-                          "X-Prometheus-Remote-Write-Version": "0.1.0"})
-            resp = conn.getresponse()
-            body = resp.read()
-            if resp.status >= 300:
-                raise RuntimeError(f"remote-write {resp.status}: {body[:200]}")
+            payload = p.snappy_compress(p.encode_write_request(batch))
+            # Retry on 429 (rate limited) with exponential backoff
+            max_retries = 5
+            base_delay = 0.5
+            for attempt in range(max_retries + 1):
+                conn.request("POST", "/api/v1/write",
+                             payload,
+                             {"Content-Type": "application/x-protobuf",
+                              "Content-Encoding": "snappy",
+                              "X-Prometheus-Remote-Write-Version": "0.1.0"})
+                resp = conn.getresponse()
+                body = resp.read()
+                if resp.status == 429 and attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    print(f"[init] remote-write 429, retrying in {delay}s (attempt {attempt+1}/{max_retries})", file=sys.stderr)
+                    time.sleep(delay)
+                    continue
+                if resp.status >= 300:
+                    raise RuntimeError(f"remote-write {resp.status}: {body[:200]}")
+                break
             sent += len(chunk) * window.size
             reqs += 1
     conn.close()

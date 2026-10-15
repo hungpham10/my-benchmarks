@@ -71,6 +71,10 @@ def sample_stats(variant=None):
 
     variant: "jsonb" or "norm" — determines which table to query.
     If not provided, infers from VARIANT env var or tries both.
+    
+    Returns:
+    - samples: count of all http_requests_total rows
+    - sum: sum of LAST value per series (matching Prometheus's sum(http_requests_total))
     """
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)
     conn = psycopg.connect(dsn, autocommit=True)
@@ -79,12 +83,34 @@ def sample_stats(variant=None):
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
 
-    table = "metrics_norm_brin" if variant == "norm" else "metrics_jsonb"
-
-    cur.execute(f"SELECT count(*), sum(value) FROM {table}")
-    count, sum_val = cur.fetchone()
-    sum_val = float(sum_val) if sum_val else 0.0
-    count = int(count) if count else 0
+    if variant == "norm":
+        table = "metrics_norm_brin"
+        # Count all rows
+        cur.execute(f"SELECT count(*) FROM {table}")
+        count = int(cur.fetchone()[0] or 0)
+        # Sum of last value per series_id
+        cur.execute(f"""
+            SELECT sum(last_val) FROM (
+                SELECT DISTINCT ON (series_id) value AS last_val
+                FROM {table}
+                ORDER BY series_id, time DESC
+            ) sub
+        """)
+        sum_val = float(cur.fetchone()[0] or 0.0)
+    else:
+        table = "metrics_jsonb"
+        # Count all rows
+        cur.execute(f"SELECT count(*) FROM {table}")
+        count = int(cur.fetchone()[0] or 0)
+        # Sum of last value per labels (series)
+        cur.execute(f"""
+            SELECT sum(last_val) FROM (
+                SELECT DISTINCT ON (labels) value AS last_val
+                FROM {table}
+                ORDER BY labels, time DESC
+            ) sub
+        """)
+        sum_val = float(cur.fetchone()[0] or 0.0)
 
     cur.close()
     conn.close()

@@ -52,10 +52,11 @@ def _read_window_minutes():
 def sample_stats():
     """Return {'samples': count, 'sum': value} from Prometheus query API.
 
-    Uses count_over_time + sum over the window from dataset.json.
+    - samples: count of http_requests_total samples over the window
+    - sum: sum of last value per series (counter state at window end)
     """
     window_min = _read_window_minutes()
-    # count_over_time over the window used in dataset
+    # Count of samples
     q = f"sum(count_over_time(http_requests_total[{window_min}m]))"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     with urllib.request.urlopen(url_q, timeout=30) as r:
@@ -63,6 +64,7 @@ def sample_stats():
     res = data["data"]["result"]
     count = int(float(res[0]["value"][1])) if res else 0
 
+    # Sum of last value per series (counter end state)
     q = f"sum(http_requests_total)"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     with urllib.request.urlopen(url_q, timeout=30) as r:
