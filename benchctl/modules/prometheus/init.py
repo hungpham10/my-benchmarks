@@ -23,7 +23,7 @@ PROM_URL = os.environ.get("SUT_URL", "http://localhost:19090")
 SERIES_CHUNK = int(os.environ.get("SERIES_CHUNK", "200"))
 SCRAPES_PER_REQUEST = int(os.environ.get("SCRAPES_PER_REQUEST", "60"))
 # Delay between requests to avoid overwhelming Prometheus WAL (seconds)
-REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "4.0"))
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "5.0"))
 
 
 def _read_dataset_timestamps():
