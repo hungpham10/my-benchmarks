@@ -53,5 +53,9 @@ export default function () {
 }
 
 export function handleSummary(data) {
-  return { '/results/summary.json': JSON.stringify(data) };
+  // One summary file per system so each leg's k6 numbers survive instead of
+  // being overwritten by the next leg. plan.system is like "postgres/jsonb";
+  // slug it to "postgres-jsonb" for a safe filename.
+  const slug = (plan.system || 'system').replace(/\//g, '-');
+  return { [`/results/summary-${slug}.json`]: JSON.stringify(data) };
 }

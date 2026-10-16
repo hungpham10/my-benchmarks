@@ -309,6 +309,17 @@ def main():
     json.dump(manifest, open(os.path.join(RESULTS, "dataset.json"), "w"), indent=1)
     print(f"[benchctl] wrote dataset.json (t_start={t_start_ms}, t_end={t_end_ms}, samples={total_samples})", flush=True)
 
+    # Report manifest: provenance for render_manifest(). dataset.json keeps the
+    # time anchor; manifest.json keeps scenario-level metadata for the report.
+    report_manifest = {
+        "scenario": os.path.basename(scen_path),
+        "run_id": run_id,
+        "total_samples": total_samples,
+        "interval_seconds": interval_s,
+        "window_minutes": window_min,
+    }
+    json.dump(report_manifest, open(os.path.join(RESULTS, "manifest.json"), "w"), indent=1)
+
     # Build k6 image ONCE for all systems (shared image with xk6-sql)
     build_k6_image()
 
@@ -370,17 +381,11 @@ def main():
             print(out.stderr[-3000:])
             raise RuntimeError("init failed")
         init_res = json.loads(out.stdout.strip().splitlines()[-1])
-
         disk = disk_bytes_du(mod_cfg["deploy"]["disk_path"])
         slug = system.replace("/", "-")
-        json.dump({"module": system, "run_id": run_id, **init_res,
-                   "bytes_on_disk": disk,
-                   "bytes_per_sample": round(disk / init_res["samples"], 3)},
-                  open(os.path.join(RESULTS, f"disk-{slug}.json"), "w"), indent=1)
-        print(f"[benchctl] disk: {disk} B "
-              f"({disk / init_res['samples']:.2f} B/sample)", flush=True)
 
-        # Sample stats for parity (collected while SUT is still up)
+        # Sample stats for parity (collected while SUT is still up),
+        # BEFORE writing disk so bytes_per_sample uses the real row count.
         print("[benchctl] collecting sample stats for parity...", flush=True)
         stats_env = {**init_env}
         if module == "postgres":
@@ -396,6 +401,15 @@ def main():
         json.dump({"module": system, "run_id": run_id, **stats},
                   open(os.path.join(RESULTS, f"stats-{slug}.json"), "w"), indent=1)
         print(f"[benchctl] parity stats: {stats}", flush=True)
+
+        samples = stats.get("samples", init_res.get("samples", 0))
+        disk_samples = samples if samples > 0 else init_res.get("samples", 1)
+        json.dump({"module": system, "run_id": run_id, **init_res, **stats,
+                   "bytes_on_disk": disk,
+                   "bytes_per_sample": round(disk / disk_samples, 3) if disk_samples > 0 else 0},
+                  open(os.path.join(RESULTS, f"disk-{slug}.json"), "w"), indent=1)
+        print(f"[benchctl] disk: {disk} B "
+              f"({disk / disk_samples:.2f} B/sample)", flush=True)
 
         print("[benchctl] k6 ramp", flush=True)
         # The k6 image runs as its own uid, which is not the runner's uid on

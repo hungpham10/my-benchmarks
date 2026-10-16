@@ -178,6 +178,8 @@ def init(ahead_minutes=8):
         cols = ["time", "labels", "value"]
         table = "metrics_jsonb"
 
+    # Measure real COPY time instead of a hardcoded constant.
+    t0 = time.monotonic()
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(cols)
@@ -191,10 +193,10 @@ def init(ahead_minutes=8):
     cur.close()
     conn.close()
 
-    elapsed = 0.5  # COPY is fast
-    samples = total
-    return {"samples": samples, "seconds": round(elapsed, 1),
-            "samples_per_second": round(samples / elapsed, 1),
+    seconds = time.monotonic() - t0
+    samples = len(rows)
+    return {"samples": samples, "seconds": round(seconds, 1),
+            "samples_per_second": round(samples / seconds, 1) if seconds > 0 else 0,
             "requests": 1}
 
 

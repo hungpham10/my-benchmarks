@@ -4,6 +4,7 @@ import json
 import os
 import sys
 
+
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 OUT = os.path.join(RESULTS, "report.md")
 
@@ -16,6 +17,22 @@ def load(name):
     return {}
 
 
+def load_all(prefix):
+    """Load all JSON files matching prefix-*.json in RESULTS.
+
+    Returns {slug: data} where slug is the middle token, e.g. summary-*.json
+    for "postgres/jsonb" becomes key "postgres-jsonb".
+    """
+    out = {}
+    if not os.path.isdir(RESULTS):
+        return out
+    for f in sorted(os.listdir(RESULTS)):
+        if f.startswith(prefix + "-") and f.endswith(".json"):
+            key = f[len(prefix) + 1:-5]  # strip "prefix-" and ".json"
+            out[key] = load(f)
+    return out
+
+
 def fmt_bytes(value):
     for unit in ["B", "KB", "MB", "GB"]:
         if value < 1024:
@@ -26,10 +43,6 @@ def fmt_bytes(value):
 
 def fmt_ms(value):
     return f"{value:.1f} ms"
-
-
-def add(line=""):
-    return line
 
 
 def render_manifest(manifest):
@@ -55,6 +68,31 @@ def render_disk(disk_files):
     return "\n".join(out)
 
 
+def render_k6(summaries):
+    """Render k6 load-test table across all systems."""
+    out = ["## k6 Load Test"]
+    if not summaries:
+        out.append("No k6 summary available.")
+        return "\n".join(out)
+
+    out.append("| System | Iterations | p50 ms | p95 ms | Dropped |")
+    out.append("|--------|------------|--------|--------|---------|")
+    for system in sorted(summaries):
+        s = summaries[system]
+        m = s.get("metrics", {})
+        iters = m.get("iterations", {}).get("values", {}).get("count", 0)
+        # k6 may name the duration trend iteration_duration (xk6-sql) or
+        # http_req_duration (plain http). Accept either.
+        dur = m.get("iteration_duration") or m.get("http_req_duration", {})
+        dur_vals = dur.get("values", {})
+        p50 = dur_vals.get("med", 0)
+        p95 = dur_vals.get("p(95)", 0)
+        dropped = m.get("dropped_iterations", {}).get("values", {}).get("count", 0)
+        out.append(f"| {system} | {iters:,} | {fmt_ms(p50)} | {fmt_ms(p95)} | {dropped:,} |")
+    out.append("")
+    return "\n".join(out)
+
+
 def render_verify(verify):
     out = ["## Verification"]
     out.append(f"- Failed checks: {verify.get('failed', '?')}")
@@ -62,38 +100,37 @@ def render_verify(verify):
     return "\n".join(out)
 
 
-def render_k6(summary):
-    out = ["## k6 Load Test"]
-    if not summary:
-        out.append("No k6 summary available.")
+def render_caveats(stats_files):
+    """Data-driven caveats: what was actually measured, not boilerplate."""
+    out = ["## Caveats"]
+    if not stats_files:
+        out.append("- No sample stats available.")
+        out.append("")
         return "\n".join(out)
 
-    m = summary.get("metrics", {})
-    out.append("| Metric | Value |")
-    out.append("|--------|-------|")
+    counts = {}
+    for f in sorted(stats_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        module = d.get("module", "unknown")
+        count = d.get("samples", 0)
+        counts[module] = count
+        out.append(f"- {module}: retained {count:,} samples.")
 
-    if "http_reqs" in m:
-        out.append(f"| Total requests | {m['http_reqs']['values']['count']:,} |")
-    if "http_req_duration" in m:
-        v = m["http_req_duration"]["values"]
-        out.append(f"| HTTP p50 | {fmt_ms(v.get('med', 0))} |")
-        out.append(f"| HTTP p95 | {fmt_ms(v.get('p(95)', 0))} |")
-    if "iterations" in m:
-        out.append(f"| Iterations | {m['iterations']['values']['count']:,} |")
-    if "dropped_iterations" in m:
-        out.append(f"| Dropped iterations | {m['dropped_iterations']['values']['count']:,} |")
+    # Parity note: compare counts only; sum is diagnostic.
+    prom_count = counts.get("prometheus")
+    pg_counts = {m: c for m, c in counts.items() if m.startswith("postgres")}
+    if prom_count is not None and pg_counts:
+        pg_total = sum(pg_counts.values())
+        n_pg = len(pg_counts)
+        avg_pg = pg_total / n_pg if n_pg else 0
+        delta = prom_count - avg_pg
+        pct = (delta / prom_count * 100) if prom_count else 0
+        out.append(f"- Parity: Prometheus {prom_count:,} vs Postgres avg {avg_pg:,.0f} "
+                   f"(delta {delta:+,}, {pct:+.1f}%). Count tolerance is 2%; sum is "
+                   "recorded as diagnostic only, not verified.")
 
-    out.append("")
-    return "\n".join(out)
-
-
-def render_caveats():
-    out = ["## Caveats"]
-    out.append("- Prometheus and PostgreSQL data may differ due to:")
-    out.append("  - PostgreSQL partitioned tables may have slight timestamp precision differences")
-    out.append("  - Prometheus remote-write may buffer samples")
-    out.append("- k6 thresholds may cause early exit (exit 99 = threshold broke)")
-    out.append("- Alloy scrape interval (10s) may cause server_requests gap")
+    out.append("- k6 thresholds: exit 99 means threshold broke (""breaking point""), not an error.")
+    out.append("- Disk bytes include WAL; Postgres figure is real COPY bytes, not a hardcoded constant.")
     out.append("")
     return "\n".join(out)
 
@@ -113,11 +150,13 @@ def main():
     if verify:
         lines.append(render_verify(verify))
 
-    summary = load("summary.json")
-    if summary:
-        lines.append(render_k6(summary))
+    summaries = load_all("summary")
+    if summaries:
+        lines.append(render_k6(summaries))
 
-    lines.append(render_caveats())
+    stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
+    if stats_files:
+        lines.append(render_caveats(stats_files))
 
     with open(OUT, "w") as f:
         f.write("\n".join(lines))
