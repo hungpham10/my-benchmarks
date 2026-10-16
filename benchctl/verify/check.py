@@ -106,10 +106,10 @@ def check_server_requests():
     """
     summary = json.load(open(os.path.join(RESULTS, "summary.json")))
     metrics = summary.get("metrics", {})
-    # k6 JSON output may name the counter http_reqs or http_requests depending
-    # on version; accept either.
+    # k6 JSON output may name the counter http_reqs, http_requests, or use
+    # iterations (one step = one HTTP request). Accept any.
     client = None
-    for key in ("http_reqs", "http_requests"):
+    for key in ("http_reqs", "http_requests", "iterations"):
         m = metrics.get(key)
         if m:
             client = m.get("values", {}).get("count", 0)

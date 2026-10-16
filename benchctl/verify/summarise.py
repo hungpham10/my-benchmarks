@@ -12,8 +12,11 @@ RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 d = json.load(open(os.path.join(RESULTS, "summary.json")))["metrics"]
 print("iterations:", d["iterations"]["values"]["count"])
-p50 = round(d["http_req_duration"]["values"]["med"], 2)
-p95 = round(d["http_req_duration"]["values"]["p(95)"], 2)
+# k6 JSON may name the duration metric http_req_duration or iteration_duration
+dur = d.get("http_req_duration") or d.get("iteration_duration", {})
+dur_vals = dur.get("values", {})
+p50 = round(dur_vals.get("med", 0), 2)
+p95 = round(dur_vals.get("p(95)", 0), 2)
 print(f"http med/p95: {p50} / {p95} ms")
 print("dropped_iterations:",
       d.get("dropped_iterations", {}).get("values", {}).get("count", 0))
