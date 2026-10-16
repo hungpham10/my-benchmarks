@@ -68,16 +68,18 @@ def sample_stats():
     count = int(float(res[0]["value"][1])) if res else 0
 
     # Sum of last value per series (counter end state) - evaluate at t_end_ms
-    # last_over_time returns the last sample in the window, matching Postgres's
-    # DISTINCT ON (...) ORDER BY time DESC.
-    q = f"sum(last_over_time(http_requests_total[{window_min}m]))"
+    # Query each series' current value at t_end_ms and sum client-side, to
+    # avoid any PromQL aggregation quirks with future-dated data.
+    q = f"http_requests_total"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     if t_end_ms:
         url_q += f"&time={t_end_ms / 1000}"
     with urllib.request.urlopen(url_q, timeout=30) as r:
         data = json.load(r)
     res = data["data"]["result"]
-    sum_val = float(res[0]["value"][1]) if res else 0.0
+    sum_val = 0.0
+    for sample in res:
+        sum_val += float(sample["value"][1])
 
     return {"samples": count, "sum": sum_val}
 
