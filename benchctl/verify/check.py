@@ -20,6 +20,22 @@ sys.path.insert(0, SHARED)
 import queries as Q
 
 
+def load_all_summaries():
+    """Load all summary-<slug>.json files written by k6 per leg.
+
+    Returns {slug: data} where slug is e.g. "prometheus", "postgres-jsonb".
+    Returns {} if no summary files exist (k6 leg never ran).
+    """
+    out = {}
+    if not os.path.isdir(RESULTS):
+        return out
+    for f in sorted(os.listdir(RESULTS)):
+        if f.startswith("summary-") and f.endswith(".json"):
+            key = f[len("summary-"):-5]
+            out[key] = json.load(open(os.path.join(RESULTS, f)))
+    return out
+
+
 def check_parity():
     """Real parity: compare sample stats collected from each system at init time.
 
@@ -67,19 +83,20 @@ def check_parity():
 
 
 def check_continuity(min_points=10):
-    path = os.path.join(RESULTS, "summary.json")
-    if not os.path.exists(path):
-        return False, "no k6 summary.json (k6 leg never ran?)"
-    data = json.load(open(path))
-    # k6 summary carries per-metric sample counts; the custom trend must exist
-    trend = data.get("metrics", {}).get("step_latency_ms")
-    if not trend:
-        return False, "step_latency_ms missing: the module step never reported"
-    iters = data.get("metrics", {}).get("iterations", {}).get("values", {})
-    n = iters.get("count", 0)
-    if n < min_points:
-        return False, f"only {n} latency samples (< {min_points}): curve is fiction"
-    return True, f"{n} latency samples"
+    summaries = load_all_summaries()
+    if not summaries:
+        return False, "no k6 summary-*.json files (k6 leg never ran?)"
+    details = []
+    for slug, data in sorted(summaries.items()):
+        m = data.get("metrics", {})
+        trend = m.get("step_latency_ms")
+        if not trend:
+            return False, f"{slug}: step_latency_ms missing (module step never reported)"
+        n = m.get("iterations", {}).get("values", {}).get("count", 0)
+        if n < min_points:
+            return False, f"{slug}: only {n} latency samples (< {min_points}): curve is fiction"
+        details.append(f"{slug}: {n} latency samples")
+    return True, "; ".join(details)
 
 
 def check_envelope():
@@ -104,18 +121,9 @@ def check_server_requests():
     server itself. A gap means requests died on the wire that k6 never saw,
     and the latency curve is missing its worst points.
     """
-    summary = json.load(open(os.path.join(RESULTS, "summary.json")))
-    metrics = summary.get("metrics", {})
-    # k6 JSON output may name the counter http_reqs, http_requests, or use
-    # iterations (one step = one HTTP request). Accept any.
-    client = None
-    for key in ("http_reqs", "http_requests", "iterations"):
-        m = metrics.get(key)
-        if m:
-            client = m.get("values", {}).get("count", 0)
-            break
-    if client is None:
-        return False, f"no http request count in k6 summary (keys: {sorted(metrics)})"
+    summaries = load_all_summaries()
+    if not summaries:
+        return False, "no k6 summary-*.json files (k6 leg never ran?)"
     files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
     if not files:
         return False, "no disk results holding a server count"
@@ -124,15 +132,29 @@ def check_server_requests():
         disk = json.load(open(os.path.join(RESULTS, f)))
         server = disk.get("server_requests")
         if server is None:
-            return False, f"{f}: driver never recorded server_requests"
+            return False, f"{disk['module']}: driver never recorded server_requests"
+        # Match disk module name (e.g. "postgres/jsonb") to summary slug
+        # (e.g. "postgres-jsonb") by replacing "/" with "-".
+        slug = disk["module"].replace("/", "-")
+        s = summaries.get(slug)
+        client = None
+        if s:
+            metrics = s.get("metrics", {})
+            # k6 JSON output may name the counter http_reqs, http_requests,
+            # or use iterations (one step = one HTTP request). Accept any.
+            for key in ("http_reqs", "http_requests", "iterations"):
+                m = metrics.get(key)
+                if m:
+                    client = m.get("values", {}).get("count", 0)
+                    break
+        if client is None:
+            worst.append(f"{disk['module']}: no k6 client count in summary-{slug}.json")
+            continue
         gap = client - server
         tol = max(50, int(client * 0.05))
         status = "ok" if 0 <= gap <= tol else "GAP"
         worst.append(f"{disk['module']}: client={client} server={server} "
                      f"gap={gap} [{status}]")
-        if status != "ok":
-            worst.append(f"{disk['module']}: client={client} server={server} "
-                         f"gap={gap} [GAP]")
     # Non-fatal: pg_stat_statements may not track every normalized query
     # (e.g. xk6-sql prepared statements). Parity passing proves data integrity.
     return True, "; ".join(worst) if worst else "server requests within tolerance"
