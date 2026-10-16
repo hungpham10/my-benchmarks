@@ -105,7 +105,17 @@ def check_server_requests():
     and the latency curve is missing its worst points.
     """
     summary = json.load(open(os.path.join(RESULTS, "summary.json")))
-    client = summary["metrics"]["http_reqs"]["values"]["count"]
+    metrics = summary.get("metrics", {})
+    # k6 JSON output may name the counter http_reqs or http_requests depending
+    # on version; accept either.
+    client = None
+    for key in ("http_reqs", "http_requests"):
+        m = metrics.get(key)
+        if m:
+            client = m.get("values", {}).get("count", 0)
+            break
+    if client is None:
+        return False, f"no http request count in k6 summary (keys: {sorted(metrics)})"
     files = [f for f in os.listdir(RESULTS) if f.startswith("disk-")]
     if not files:
         return False, "no disk results holding a server count"
