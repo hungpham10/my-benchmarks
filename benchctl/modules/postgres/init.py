@@ -57,17 +57,17 @@ def _csv_rows(total, variant, t_start_ms, interval_s, window_min):
 
     rows = []
     for s in range(len(counter_series)):
+        desc = counter_series[s]
+        lbls = d.labels_json(desc)  # unique label set per series, matching Prometheus
+        series_id = s + 1           # unique series_id per series, starts at 1
         for i in range(len(timestamps)):
-            ts = t_start_ms + i * interval_s * 1000
-            # Convert Unix timestamp to ISO format for PostgreSQL timestamptz
             ts_iso = datetime.fromtimestamp(timestamps[i] / 1000, tz=timezone.utc).isoformat()
             val = values[s, i]
             if variant == "norm":
-                # time, series_id, value - series_id is 0 for now (simplified)
-                rows.append((ts_iso, 0, val))
+                # time, series_id, value - unique series_id per series
+                rows.append((ts_iso, series_id, val))
             else:
-                # time, labels, value - use same metric name as Prometheus
-                lbls = '{"__name__":"http_requests_total"}'
+                # time, labels, value - unique labels per series
                 rows.append((ts_iso, lbls, val))
     return rows
 

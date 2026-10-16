@@ -88,12 +88,12 @@ def sample_stats(variant=None):
         # Count all rows
         cur.execute(f"SELECT count(*) FROM {table}")
         count = int(cur.fetchone()[0] or 0)
-        # Sum of last value per series (using labels as unique series identifier)
+        # Sum of last value per series_id
         cur.execute(f"""
             SELECT sum(last_val) FROM (
-                SELECT DISTINCT ON (labels) value AS last_val
+                SELECT DISTINCT ON (series_id) value AS last_val
                 FROM {table}
-                ORDER BY labels, time DESC
+                ORDER BY series_id, time DESC
             ) sub
         """)
         sum_val = float(cur.fetchone()[0] or 0.0)
