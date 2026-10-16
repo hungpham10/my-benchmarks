@@ -68,7 +68,9 @@ def sample_stats():
     count = int(float(res[0]["value"][1])) if res else 0
 
     # Sum of last value per series (counter end state) - evaluate at t_end_ms
-    q = f"sum(http_requests_total)"
+    # last_over_time returns the last sample in the window, matching Postgres's
+    # DISTINCT ON (...) ORDER BY time DESC.
+    q = f"sum(last_over_time(http_requests_total[{window_min}m]))"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     if t_end_ms:
         url_q += f"&time={t_end_ms / 1000}"
