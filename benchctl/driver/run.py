@@ -436,27 +436,35 @@ def main():
                 raise RuntimeError("server request count failed")
             return json.loads(out.stdout.strip().splitlines()[-1])["server_requests"]
 
-        def cadvisor_value(metric_name):
-            """Latest value for *metric_name* from cAdvisor /metrics for the SUT."""
-            try:
-                with urllib.request.urlopen(
-                        "http://localhost:18080/metrics", timeout=10) as r:
-                    text = r.read().decode()
-                for line in text.splitlines():
-                    if line.startswith("#") or not line.strip():
+        def cadvisor_stats():
+            """Latest (cpu_ns, mem_bytes) for the SUT from cAdvisor JSON API.
+
+            cAdvisor exposes /api/v1.3/containers/docker/<name> returning
+            JSON with a stats array (newest first). cpu.usage.total is in
+            nanoseconds; memory.working_set is in bytes. Returns (None, None)
+            if cAdvisor is unreachable or the container is not found — the
+            run continues, resource data is simply absent.
+            """
+            for container_name in ("benchctl-sut", "docker/benchctl-sut"):
+                try:
+                    with urllib.request.urlopen(
+                            f"http://localhost:18080/api/v1.3/containers/docker/{container_name}",
+                            timeout=10) as r:
+                        data = json.load(r)
+                    stats = data.get("stats", [])
+                    if not stats:
                         continue
-                    if metric_name in line and 'name="benchctl-sut"' in line:
-                        parts = line.rsplit(None, 1)
-                        if len(parts) == 2:
-                            return float(parts[1])
-            except Exception:
-                pass
-            return None
+                    latest = stats[0]  # newest first
+                    cpu_ns = latest.get("cpu", {}).get("usage", {}).get("total")
+                    mem_bytes = latest.get("memory", {}).get("working_set")
+                    if cpu_ns is not None and mem_bytes is not None:
+                        return cpu_ns, mem_bytes
+                except Exception:
+                    continue
+            return None, None
 
         def sample_resources():
-            cpu = cadvisor_value("container_cpu_usage_seconds_total")
-            mem = cadvisor_value("container_memory_working_set_bytes")
-            return cpu, mem
+            return cadvisor_stats()
 
         before = server_count()
         cpu_start, mem_start = sample_resources()
@@ -493,7 +501,7 @@ def main():
         # twice, so peaks between samples are not captured.
         cpu_rate = None
         if cpu_start is not None and cpu_end is not None and leg_seconds > 0:
-            cpu_rate = round((cpu_end - cpu_start) / leg_seconds, 4)
+            cpu_rate = round((cpu_end - cpu_start) / (leg_seconds * 1e9), 4)
         mem_max = None
         mem_max_mb = None
         candidates = [m for m in (mem_start, mem_end) if m is not None]
