@@ -413,11 +413,13 @@ def main():
 
         print("[benchctl] k6 ramp", flush=True)
         # The k6 image runs as its own uid, which is not the runner's uid on
-        # Linux (Docker Desktop on macOS masks this). Without world-writable
+        # Linux (Docker Desktop on macOS masks this). Without group-writable
         # results/, handleSummary dies with permission denied and verify
         # fails on a run that otherwise measured correctly — which is exactly
         # what happened the first time this ran on CI.
-        os.chmod(RESULTS, 0o777)
+        # Use 0o775 (group-writable) instead of 0o777 (world-writable) for
+        # security; k6 container shares the group via Docker user namespace.
+        os.chmod(RESULTS, 0o775)
 
         def server_count():
             """Ask the module what its server handled, right now.
