@@ -100,7 +100,24 @@ def render_verify(verify):
     return "\n".join(out)
 
 
-def render_caveats(stats_files):
+def render_resource(resources):
+    """Render per-system CPU/memory sampled from cAdvisor during the k6 leg."""
+    out = ["## Resource Usage (during k6 leg)"]
+    if not resources:
+        out.append("No resource data available.")
+        return "\n".join(out)
+
+    out.append("| System | Leg (s) | CPU core avg | Mem max MB |")
+    out.append("|--------|---------|--------------|------------|")
+    for system in sorted(resources):
+        d = resources[system]
+        out.append(f"| {system} | {d.get('leg_seconds', 'n/a')} | "
+                   f"{d.get('cpu_core_avg', 'n/a')} | {d.get('mem_max_mb', 'n/a')} |")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_caveats(stats_files, disk_files=None):
     """Data-driven caveats: what was actually measured, not boilerplate."""
     out = ["## Caveats"]
     if not stats_files:
@@ -130,6 +147,18 @@ def render_caveats(stats_files):
                    "recorded as diagnostic only, not verified.")
 
     out.append("- k6 thresholds: exit 99 means threshold broke (""breaking point""), not an error.")
+    if disk_files:
+        broke = []
+        for f in sorted(disk_files):
+            d = json.load(open(os.path.join(RESULTS, f)))
+            code = d.get("k6_exit_code")
+            if code == 99:
+                broke.append(d["module"])
+        if broke:
+            out.append(f"- Breaking point reached: {', '.join(broke)} (k6 exit 99).")
+        else:
+            out.append("- Breaking point: not reached (no k6 threshold broke).")
+
     out.append("- Disk bytes include WAL; Postgres figure is real COPY bytes, not a hardcoded constant.")
     out.append("")
     return "\n".join(out)
@@ -154,9 +183,13 @@ def main():
     if summaries:
         lines.append(render_k6(summaries))
 
+    resources = load_all("resource")
+    if resources:
+        lines.append(render_resource(resources))
+
     stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
     if stats_files:
-        lines.append(render_caveats(stats_files))
+        lines.append(render_caveats(stats_files, disk_files))
 
     with open(OUT, "w") as f:
         f.write("\n".join(lines))

@@ -436,11 +436,37 @@ def main():
                 raise RuntimeError("server request count failed")
             return json.loads(out.stdout.strip().splitlines()[-1])["server_requests"]
 
+        def cadvisor_value(metric_name):
+            """Latest value for *metric_name* from cAdvisor /metrics for the SUT."""
+            try:
+                with urllib.request.urlopen(
+                        "http://localhost:18080/metrics", timeout=10) as r:
+                    text = r.read().decode()
+                for line in text.splitlines():
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    if metric_name in line and 'name="benchctl-sut"' in line:
+                        parts = line.rsplit(None, 1)
+                        if len(parts) == 2:
+                            return float(parts[1])
+            except Exception:
+                pass
+            return None
+
+        def sample_resources():
+            cpu = cadvisor_value("container_cpu_usage_seconds_total")
+            mem = cadvisor_value("container_memory_working_set_bytes")
+            return cpu, mem
+
         before = server_count()
+        cpu_start, mem_start = sample_resources()
+        t_leg_start = time.monotonic()
         r = sh("docker", "compose", "-f", "docker-compose.gen.yml",
                "--profile", "k6", "run", "--rm", "k6",
                "run", "--out", "experimental-prometheus-rw",
                "/scripts/ramp.js", check=False)
+        leg_seconds = time.monotonic() - t_leg_start
+        cpu_end, mem_end = sample_resources()
         print(f"[benchctl] k6 exit: {r.returncode} (99 = threshold broke: "
               "that IS the breaking point)", flush=True)
         # Check SUT container for OOM/exit info
@@ -460,11 +486,34 @@ def main():
                     print(f"[benchctl] WARNING: SUT exited with code {state.get('ExitCode')}", flush=True)
         except Exception:
             pass
+
+        # Resource usage during the k6 leg, from cAdvisor (mapped to host:18080).
+        # CPU is a rate over the leg (fraction of one core); memory is the max
+        # observed at start/end of the leg. Honest lower bound: we sample only
+        # twice, so peaks between samples are not captured.
+        cpu_rate = None
+        if cpu_start is not None and cpu_end is not None and leg_seconds > 0:
+            cpu_rate = round((cpu_end - cpu_start) / leg_seconds, 4)
+        mem_max = None
+        mem_max_mb = None
+        candidates = [m for m in (mem_start, mem_end) if m is not None]
+        if candidates:
+            mem_max = max(candidates)
+            mem_max_mb = round(mem_max / (1024 * 1024), 1)
+        json.dump({"module": system, "run_id": run_id,
+                   "leg_seconds": round(leg_seconds, 1),
+                   "cpu_core_avg": cpu_rate,
+                   "mem_bytes_max": mem_max,
+                   "mem_max_mb": mem_max_mb},
+                  open(os.path.join(RESULTS, f"resource-{slug}.json"), "w"), indent=1)
+        print(f"[benchctl] resource: cpu={cpu_rate} core, mem={mem_max_mb} MB", flush=True)
+
         server_n = server_count() - before
         print(f"[benchctl] server handled {server_n} queries "
               "during the leg", flush=True)
         payload = json.load(open(os.path.join(RESULTS, f"disk-{slug}.json")))
         payload["server_requests"] = server_n
+        payload["k6_exit_code"] = int(r.returncode)
         json.dump(payload, open(os.path.join(RESULTS, f"disk-{slug}.json"),
                                 "w"), indent=1)
 

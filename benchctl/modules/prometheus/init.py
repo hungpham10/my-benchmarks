@@ -51,6 +51,7 @@ def init(ahead_minutes=8):
     conn.connect()
     sent, reqs = 0, 0
     t0 = time.monotonic()
+    sleep_total = 0.0
     for cs in range(0, len(series), SERIES_CHUNK):
         chunk = series[cs:cs + SERIES_CHUNK]
         block = v.generate_chunk(chunk)
@@ -83,13 +84,19 @@ def init(ahead_minutes=8):
                 break
             sent += len(chunk) * window.size
             reqs += 1
-            # Small delay to avoid overwhelming Prometheus WAL
+            # Small delay to avoid overwhelming Prometheus WAL.
+            # Tracked separately so we can report real ingest time vs pacing delay.
             if REQUEST_DELAY > 0:
+                sleep_start = time.monotonic()
                 time.sleep(REQUEST_DELAY)
+                sleep_total += time.monotonic() - sleep_start
     conn.close()
-    elapsed = time.monotonic() - t0
-    return {"samples": sent, "seconds": round(elapsed, 1),
-            "samples_per_second": round(sent / elapsed, 1),
+    wall = time.monotonic() - t0
+    ingest = wall - sleep_total
+    return {"samples": sent, "seconds": round(wall, 1),
+            "ingest_seconds": round(ingest, 1),
+            "sleep_seconds": round(sleep_total, 1),
+            "samples_per_second": round(sent / ingest, 1) if ingest > 0 else 0,
             "requests": reqs}
 
 

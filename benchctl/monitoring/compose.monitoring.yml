@@ -22,6 +22,8 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
     privileged: true
+    ports:
+      - "18080:8080"
     networks:
       - mon
     restart: unless-stopped
