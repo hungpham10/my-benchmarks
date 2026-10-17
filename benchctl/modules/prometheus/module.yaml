@@ -1,0 +1,54 @@
+# Module contract (5 functions; no module registers without all 5):
+#   deploy()    -> containers up, healthy, endpoint returned
+#   init()      -> load data for (scale, shape), return {samples, bytes_on_disk}
+#   start_load()-> open write path, return write handle
+#   stop_load() -> flush + close, MUST guarantee durable before returning
+#   teardown()  -> volumes removed
+#
+# What the module owns: image, flags, healthcheck, init data, ONE k6 step,
+# and how to count what its server handled (requests.py).
+# What the framework owns: envelope, stages, thresholds, plan.json, compose.
+
+name: prometheus
+image: prom/prometheus:latest
+
+deploy:
+  command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    - --storage.tsdb.path=/prometheus
+    - --web.enable-remote-write-receiver
+    - --web.enable-lifecycle
+    - --query.max-samples=50000000
+  config_files:
+    - src: prometheus.yml
+      dst: /etc/prometheus/prometheus.yml
+  data_volume: { name: sut-data, dst: /prometheus }
+  ports:
+    # Default avoids 9090: a prom-vs-postgres stack may be running.
+    - { env: SUT_PORT, default: "19090", container: 9090 }
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  # Host-side base init.py/requests.py talk to. {VAR} resolves from env.
+  endpoint: "http://localhost:{SUT_PORT}"
+  disk_path: /prometheus
+
+# Remote-write ingest window. Prometheus refuses samples older than
+# MaxTime - chunkRange/2 (~1h) and more than 10m ahead of wall clock,
+# so the dataset is future-dated inside [now-50m, now+10m].
+ingest:
+  path: /api/v1/write
+  ahead_minutes: 8
+
+k6:
+  # Uses shared benchctl-k6 image (built once with xk6-sql + postgres driver)
+  env:
+    PROM_URL: "http://sut:9090"
+
+# Server-side request accounting: /metrics parsed directly (observe.py),
+# because the SUT does not scrape itself and its own query API cannot see
+# its self-metrics at all.
+query_marker: "/api/v1/query"
+requests_module: "modules/prometheus/observe.py"
