@@ -1,0 +1,35 @@
+id: load-test
+systems: [prometheus]
+shape: counter
+scale: medium
+
+# Medium-length test (~10 min) to push enough metric points to Grafana Cloud
+# for a visible curve, without blocking PRs (smoke) or taking full nightly time.
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  stages:
+    # Ramp up gently to let the SUT warm up
+    - { target: 10,  duration: 1m }
+    - { target: 50,  duration: 2m }
+    - { target: 100, duration: 2m }
+    # Stay at moderate load long enough for Cloud to scrape
+    - { target: 200, duration: 3m }
+    # Ramp down
+    - { target: 10,  duration: 1m }
+  graceful_ramp_down: 30s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 15
+
+dataset:
+  jobs: 2
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+  query: 'sum(rate(http_requests_total[5m]))'

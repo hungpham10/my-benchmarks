@@ -1,0 +1,10 @@
+# Deliberately scrapes nothing: a self-scrape would add prometheus_*
+# series to the TSDB being measured and inflate bytes-per-sample.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+storage:
+  tsdb:
+    retention:
+      time: 30d
+scrape_configs: []
