@@ -439,26 +439,41 @@ def main():
         def cadvisor_stats():
             """Latest (cpu_ns, mem_bytes) for the SUT from cAdvisor JSON API.
 
-            cAdvisor exposes /api/v1.3/containers/docker/<name> returning
-            JSON with a stats array (newest first). cpu.usage.total is in
-            nanoseconds; memory.working_set is in bytes. Returns (None, None)
-            if cAdvisor is unreachable or the container is not found — the
-            run continues, resource data is simply absent.
+            Lists containers to discover the SUT name, then reads its latest
+            stats. cpu.usage.total is in nanoseconds; memory.working_set in
+            bytes. Returns (None, None) if cAdvisor is unreachable — run
+            continues, resource data simply absent.
             """
-            for container_name in ("benchctl-sut", "docker/benchctl-sut"):
+            try:
+                with urllib.request.urlopen(
+                        "http://localhost:18080/api/v1.3/containers/", timeout=10) as r:
+                    containers = json.load(r)
+            except Exception:
+                return None, None
+
+            sut_key = None
+            for key in containers:
+                if "sut" in key.lower():
+                    sut_key = key
+                    break
+            if not sut_key:
+                return None, None
+
+            for path in (
+                f"/api/v1.3/containers/{sut_key}",
+                f"/api/v1.3/containers/{sut_key.lstrip('/')}",
+            ):
                 try:
                     with urllib.request.urlopen(
-                            f"http://localhost:18080/api/v1.3/containers/docker/{container_name}",
-                            timeout=10) as r:
+                            f"http://localhost:18080{path}", timeout=10) as r:
                         data = json.load(r)
                     stats = data.get("stats", [])
-                    if not stats:
-                        continue
-                    latest = stats[0]  # newest first
-                    cpu_ns = latest.get("cpu", {}).get("usage", {}).get("total")
-                    mem_bytes = latest.get("memory", {}).get("working_set")
-                    if cpu_ns is not None and mem_bytes is not None:
-                        return cpu_ns, mem_bytes
+                    if stats:
+                        latest = stats[0]  # newest first
+                        cpu_ns = latest.get("cpu", {}).get("usage", {}).get("total")
+                        mem_bytes = latest.get("memory", {}).get("working_set")
+                        if cpu_ns is not None and mem_bytes is not None:
+                            return cpu_ns, mem_bytes
                 except Exception:
                     continue
             return None, None
