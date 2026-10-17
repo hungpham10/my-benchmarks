@@ -1,0 +1,61 @@
+// Single variant: Cloud is the only receiver. There is no local
+// monitoring Prometheus — exact numbers come from du and requests.py,
+// curves go to Cloud. When GRAFANA_CLOUD_RW_URL is empty the driver skips
+// this stack entirely instead of starting a receiver-less Alloy.
+// Validate: docker run --rm -v "$PWD:/etc/alloy:ro" grafana/alloy:latest \
+//   validate /etc/alloy/config.alloy
+
+// Per-container CPU and memory, from one cAdvisor endpoint. Scraped exactly
+// once: cAdvisor answers for EVERY container on this address, so fanning out
+// one target per container makes every container's series claim to be every
+// other container's. One scrape, labels already correct.
+prometheus.scrape "cadvisor" {
+  targets = [{
+    "__address__"      = "benchctl-cadvisor:8080",
+    "__metrics_path__" = "/metrics",
+  }]
+  forward_to      = [prometheus.relabel.identity.receiver]
+  scrape_interval = "10s"
+}
+
+// The system under test, whatever the current module is. Prometheus exposes
+// /metrics itself; a module that does not (postgres) simply yields up=0 here
+// and its curves come from cAdvisor + k6. Nothing errors.
+prometheus.scrape "sut" {
+  targets = [{
+    "__address__"      = "benchctl-sut:9090",
+    "__metrics_path__" = "/metrics",
+    "job"              = "sut",
+  }]
+  forward_to      = [prometheus.relabel.identity.receiver]
+  scrape_interval = "10s"
+}
+
+// Identity: every sample carries which run and which module produced it.
+// Without these, every run lands on the same series and history is one flat
+// line with no run boundaries.
+prometheus.relabel "identity" {
+  forward_to = [prometheus.remote_write.cloud.receiver]
+  rule {
+    source_labels = []
+    regex         = ".*"
+    replacement   = sys.env("BENCH_RUN_ID")
+    target_label  = "run_id"
+  }
+  rule {
+    source_labels = []
+    regex         = ".*"
+    replacement   = sys.env("BENCH_MODULE")
+    target_label  = "module"
+  }
+}
+
+prometheus.remote_write "cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_RW_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_RW_USER")
+      password = sys.env("GRAFANA_CLOUD_RW_PASS")
+    }
+  }
+}

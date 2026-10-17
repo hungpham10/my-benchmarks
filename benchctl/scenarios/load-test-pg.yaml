@@ -1,0 +1,40 @@
+id: load-test-pg
+systems: [prometheus, postgres/jsonb, postgres/norm]
+shape: counter
+scale: medium
+
+# Medium-length test (~10 min) comparing Prometheus vs PostgreSQL (jsonb + norm)
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  maxVUs: 32
+  stages:
+    - { target: 200,  duration: 1m }
+    - { target: 500,  duration: 2m }
+    - { target: 1000, duration: 2m }
+    - { target: 2000, duration: 3m }
+    - { target: 50,   duration: 1m }
+  graceful_ramp_down: 30s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 15
+
+dataset:
+  jobs: 2
+  instances_per_job: 400
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  prometheus: 'sum(rate(http_requests_total[5m]))'
+  postgres/jsonb:
+    query: q1_counter_rate
+    table: metrics_jsonb
+  postgres/norm:
+    query: q1_counter_rate
+    table: metrics_norm_brin
