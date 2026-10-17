@@ -1,0 +1,61 @@
+# Static monitoring stack. Never generated, never per-leg.
+#
+# Alloy + cAdvisor only. Curves (CPU/memory per container, SUT self-metrics)
+# go straight to Grafana Cloud — there is no local monitoring Prometheus.
+# The exact numbers (disk, request counts) never needed it either: disk comes
+# from du, request counts from each module's own requests.py.
+#
+# When GRAFANA_CLOUD_RW_URL is empty (fork PRs get no secrets) the driver
+# skips this stack entirely: an Alloy with no receiver is a crash loop, not
+# monitoring. The local summary.json stays the record.
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: benchctl-cadvisor
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    ports:
+      - "18080:8080"
+    networks:
+      - mon
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: benchctl-alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy:/etc/alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    environment:
+      - BENCH_RUN_ID=${BENCH_RUN_ID:-}
+      - BENCH_MODULE=${BENCH_MODULE:-}
+      - GRAFANA_CLOUD_RW_URL=${GRAFANA_CLOUD_RW_URL:-}
+      - GRAFANA_CLOUD_RW_USER=${GRAFANA_CLOUD_RW_USER:-}
+      - GRAFANA_CLOUD_RW_PASS=${GRAFANA_CLOUD_RW_PASS:-}
+    depends_on:
+      cadvisor:
+        condition: service_started
+    networks:
+      - mon
+    restart: unless-stopped
+
+volumes:
+  alloy-data:
+
+networks:
+  mon:
+    name: benchctl-mon
+    external: true

@@ -1,0 +1,27 @@
+// modules/postgres/k6/step.js — one SQL query via xk6-sql.
+// The driver symlinks modules/active -> the current module before the run,
+// so this import path is fixed regardless of which module is active.
+// Connection created per-VU; maxVUs in scenario limits total concurrent connections.
+// xk6-sql requires the driver OBJECT, not a string name.
+import sql from 'k6/x/sql';
+import pgDriver from 'k6/x/sql/driver/postgres';
+import { check } from 'k6';
+
+const plan = JSON.parse(open('../../../plan.json'));
+const QUERY = __ENV.K6_QUERY || plan.query;  // rendered SQL from scenario
+const PG_DSN = __ENV.PG_DSN || 'postgres://bench:bench@sut:5432/bench?sslmode=disable';
+
+let conn;
+
+export function step() {
+  if (conn === undefined) {
+    conn = sql.open(pgDriver, PG_DSN);
+  }
+  const result = conn.query(QUERY);
+  check(result, { 'query ok': (r) => r.length >= 0 });
+  return true;
+}
+
+export function teardown(data) {
+  if (conn) conn.close();
+}
