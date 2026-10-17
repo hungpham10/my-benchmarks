@@ -437,13 +437,20 @@ def main():
             return json.loads(out.stdout.strip().splitlines()[-1])["server_requests"]
 
         def cadvisor_stats():
-            """Latest (cpu_ns, mem_bytes) for the SUT from cAdvisor JSON API.
+            """Latest (cpu_ns, mem_bytes) for the SUT.
 
-            Lists containers to discover the SUT name, then reads its latest
-            stats. cpu.usage.total is in nanoseconds; memory.working_set in
-            bytes. Returns (None, None) if cAdvisor is unreachable — run
-            continues, resource data simply absent.
+            Tries cAdvisor JSON API first, then /sys/fs/cgroup (host
+            filesystem) as fallback. cpu in nanoseconds, memory in bytes.
+            Returns (None, None) if everything fails — run continues,
+            resource data simply absent.
             """
+            result = _cadvisor_json_stats()
+            if result != (None, None):
+                return result
+            return _cgroup_stats()
+
+        def _cadvisor_json_stats():
+            """cAdvisor JSON API: discover SUT via containers list, read stats."""
             try:
                 with urllib.request.urlopen(
                         "http://localhost:18080/api/v1.3/containers/", timeout=10) as r:
@@ -476,6 +483,45 @@ def main():
                             return cpu_ns, mem_bytes
                 except Exception:
                     continue
+            return None, None
+
+        def _cgroup_stats():
+            """Read SUT stats from /sys/fs/cgroup (host filesystem, cgroup v1/v2)."""
+            mem_bytes = None
+            for pattern in (
+                f"/sys/fs/cgroup/docker/{system}/memory.current",
+                f"/sys/fs/cgroup/memory/docker/{system}/memory.usage_in_bytes",
+                f"/sys/fs/cgroup/system.slice/docker-{system}.slice/memory.current",
+            ):
+                try:
+                    with open(pattern) as f:
+                        mem_bytes = int(f.read().strip())
+                        break
+                except Exception:
+                    continue
+
+            cpu_ns = None
+            for pattern in (
+                f"/sys/fs/cgroup/docker/{system}/cpu.stat",
+                f"/sys/fs/cgroup/cpuacct/docker/{system}/cpuacct.usage",
+                f"/sys/fs/cgroup/system.slice/docker-{system}.slice/cpu.stat",
+            ):
+                try:
+                    with open(pattern) as f:
+                        content = f.read().strip()
+                        if "usage_usec" in content:
+                            for line in content.splitlines():
+                                if line.startswith("usage_usec"):
+                                    cpu_ns = int(line.split()[1]) * 1000  # us→ns
+                                    break
+                        else:
+                            cpu_ns = int(content)
+                        break
+                except Exception:
+                    continue
+
+            if cpu_ns is not None or mem_bytes is not None:
+                return cpu_ns, mem_bytes
             return None, None
 
         def sample_resources():
