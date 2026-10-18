@@ -148,6 +148,13 @@ def qbench(variant=None):
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
 
+    # variant is "jsonb" | "norm" from driver (split_system), but run_all()
+    # looks up shared/queries.py by backend key: "metrics_jsonb" | "metrics_norm_brin".
+    VARIANT_TO_BACKEND = {"jsonb": "metrics_jsonb", "norm": "metrics_norm_brin"}
+    if variant not in VARIANT_TO_BACKEND:
+        raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb or norm)")
+    backend = VARIANT_TO_BACKEND[variant]
+
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)
     conn = psycopg.connect(dsn, autocommit=True)
     try:
@@ -159,7 +166,7 @@ def qbench(variant=None):
             cur.fetchall()  # consume results so timing includes data transfer
             cur.close()
 
-        results = run_all(exec_fn, t_start_ms, t_end_ms, variant)
+        results = run_all(exec_fn, t_start_ms, t_end_ms, backend)
     finally:
         conn.close()
     print(json.dumps(results))
