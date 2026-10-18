@@ -8,8 +8,12 @@ const plan = JSON.parse(open('../../../plan.json'));
 const QUERY = __ENV.K6_QUERY || plan.query;
 
 export function step() {
+  // K6_QUERY_TIME (epoch seconds) is injected by the driver from dataset.json
+  // so the query hits the future-dated window instead of wall-clock now()
+  // (which returns empty because data lives ahead of now).
+  const queryTime = __ENV.K6_QUERY_TIME || Math.floor(Date.now() / 1000);
   const res = http.get(
-    `${PROM_URL}/api/v1/query?query=${encodeURIComponent(QUERY)}&time=${Math.floor(Date.now() / 1000)}`,
+    `${PROM_URL}/api/v1/query?query=${encodeURIComponent(QUERY)}&time=${queryTime}`,
     { tags: { module: 'prometheus' } },
   );
   return res.status === 200;

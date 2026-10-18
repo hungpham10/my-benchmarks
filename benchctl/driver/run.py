@@ -26,6 +26,10 @@ SHARED = os.path.join(ROOT, "shared")
 
 COMPOSE = None
 
+# Set in main() from dataset.json so k6 queries the future-dated window
+# instead of wall-clock now() (which returns empty for Prometheus data).
+_K6_QUERY_TIME = None
+
 
 def compose_bin():
     """This machine only has hyphenated docker-compose; CI may have either."""
@@ -184,6 +188,9 @@ def gen_compose(module, cfg, mod_cfg, system, scenario):
     query = render_query(system, scenario)
     if isinstance(query, str):
         k6env["K6_QUERY"] = query
+    # Pass the query time so k6 hits the future-dated window, not wall-clock now()
+    if _K6_QUERY_TIME:
+        k6env["K6_QUERY_TIME"] = _K6_QUERY_TIME
     for k, v in k6cfg.get("env", {}).items():
         k6env[k] = expand(v)
     k6svc = {
@@ -291,9 +298,11 @@ def main():
     interval_s = ds.get("interval_seconds", 15)
     window_min = ds["window_minutes"]
     ahead_min = ds.get("ahead_minutes", 8)
+    global _K6_QUERY_TIME
     now_ms = int(time.time() * 1000)
     t_start_ms = now_ms - (window_min - ahead_min) * 60 * 1000
     t_end_ms = t_start_ms + window_min * 60 * 1000
+    _K6_QUERY_TIME = str(t_end_ms // 1000)
     total_series = ds["jobs"] * ds["instances_per_job"] * 2
     total_samples = total_series * (window_min * 60 // interval_s)
     manifest = {
