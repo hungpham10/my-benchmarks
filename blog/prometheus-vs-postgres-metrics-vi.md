@@ -1,13 +1,13 @@
 ---
 title: "Prometheus vs PostgreSQL làm kho lưu metrics: kết quả benchmark thực tế"
-date: 2026-10-17
+date: 2026-10-18
 tags: [prometheus, postgresql, benchmark, metrics, time-series]
 excerpt: "Có nên dùng PostgreSQL cho metrics không? Tôi chạy benchmark đối đầu (Prometheus vs Postgres jsonb vs Postgres normalized) trên cùng một tập dữ liệu và cùng tải truy vấn. Dưới đây là số đo thực tế, kèm cảnh báo trung thực."
 ---
 
 # Prometheus vs PostgreSQL làm kho lưu metrics
 
-**"Tôi có thể dùng PostgreSQL cho metrics không?"** Câu hỏi này hấp dẫn. Bạn đã chạy Postgres, đội ngũ biết SQL, và việc thêm hệ thống mới cảm thấy như thừa thải. Nhưng dữ liệu metrics hình thành khác dữ liệu quan hệ — chỉ ghi thêm (append-only), có thứ tự thời gian, được định danh bởi tập nhãn thay vì khóa số nguyên.
+**"Có nên dùng PostgreSQL cho metrics không?"** Câu hỏi này hấp dẫn. Bạn đã chạy Postgres, đội ngũ biết SQL, và việc thêm hệ thống mới cảm thấy như thừa thải. Nhưng dữ liệu metrics hình thành khác dữ liệu quan hệ — chỉ ghi thêm (append-only), có thứ tự thời gian, được định danh bởi tập nhãn thay vì khóa số nguyên.
 
 Tôi chạy benchmark đối đầu để xem cái gì thực sự hỏng. Cùng tập dữ liệu, cùng tải truy vấn, cùng khung phần cứng, đo trên mọi lần chạy. Không có hằng số bịa đặt.
 
@@ -26,7 +26,7 @@ Mọi lần chạy đều xác thực **đồng bộ mẫu**: số lượng mẫ
 ## Tốc độ ghi (với một cảnh báo trung thực)
 
 | Hệ thống | Thời gian ghi thực | Tốc độ trong khi ghi |
-|----------|-------------------|---------------------|
+|----------|-----------------|---------------------|
 | postgres/jsonb | 1.4 s (COPY) | ~106k mẫu/s |
 | postgres/norm | 0.6 s (COPY) | ~254k mẫu/s |
 | prometheus | 0.5 s ghi + 72 s chờ pacing | ~284k mẫu/s trong khi ghi |
@@ -47,20 +47,22 @@ Chi phí không thực sự là cấu trúc chỉ mục — nó là **văn bản
 
 ## Kiểm tra tải truy vấn — ai gãy đầu tiên?
 
-Tôi tăng tốc độ truy vấn từ 200 → 2,000 req/s bằng k6 (ramping-arrival-rate, ngưỡng p95 < 500 ms). Tất cả ba hệ thống đều gặp điểm gãy sau cùng. Dưới đây là những gì mỗi hệ thống làm ngay trước khi gãy:
+Tôi tăng tốc độ truy vấn từ 200 → 2,000 req/s bằng k6 (ramping-arrival-rate, ngưỡng p95 < 500 ms). Tất cả ba hệ thống đều gặp điểm gãy (k6 exit 99). Dưới đây là những gì mỗi hệ thống làm ngay trước khi gãy:
 
 | Hệ thống | Lần lặp khi gãy | Độ trễ p50 | Độ trễ p95 | Lần lặp bị từ chối |
 |----------|-----------------|------------|------------|-------------------|
-| postgres/jsonb | 281 | 67 s | 82 s | 469,518 |
-| postgres/norm | 469,688 | 0.5 ms | 0.6 ms | 111 |
-| prometheus | 151,889 | 1.8 s | 2.0 s | 317,911 |
+| postgres/jsonb | 278 | 66 s | 81 s | 469,522 |
+| postgres/norm | 469,604 | 0.5 ms | 0.7 ms | 196 |
+| prometheus | 176,266 | 1.4 s | 3.1 s | 293,533 |
 
-**Kết quả chính:** Ở hình dạng truy vấn này (rate qua chuỗi counter, nhóm theo công việc), Postgres chuẩn hóa chiến thắng **cả độ trễ lẫn tốc độ**. Prometheus từ chối khoảng 318k lần lặp vì mỗi truy vấn mất khoảng 2 giây — nó không kịp ở 2,000 req/s. jsonb gãy ngay lập tức vì mỗi truy vấn mất khoảng 80 giây (jsonb containment + lấy heap cho mọi hàng).
+**Kết quả chính:** Ở hình dạng truy vấn này (rate qua chuỗi counter, nhóm theo công việc), Postgres chuẩn hóa chiến thắng **cả độ trễ lẫn tốc độ**. Prometheus từ chối khoảng 293k lần lặp vì mỗi truy vấn mất khoảng 1–3 giây — nó không kịp ở 2,000 req/s. jsonb gãy ngay lập tức vì mỗi truy vấn mất khoảng 80 giây (jsonb containment + lấy heap cho mọi hàng).
+
+Lưu ý độ trễ p95 của Prometheus chênh lệch liên lần (~1.9–3.1 giây giữa các lần chạy). Độ trễ tại điểm gãy không ổn định bằng giá trị trung bình — hãy coi nó là một khoảng, không phải con số duy nhất.
 
 ## Vật PostgreSQL thực sự thắng
 
 - **Phần trăm trong một khoảng.** `percentile_cont(0.9) WITHIN GROUP (ORDER BY value)` sắp xếp trong cơ sở dữ liệu và không bị chịu ngưỡng `--query.max-samples` của Prometheus (mặc định 50M). `quantile_over_time` của Prometheus sắp xếp trong RAM và *bị* giới hạn.
-- **Tra cứu điểm một chuỗi duy nhất.** Một chuỗi trong khoảng thời gian là dưới một mili giây trong Postgres nhờ tra cứu điểm B-tree.
+- **Tra cứu điểm một chuỗi duy nhất.** Một chuỗi trong khoảng thời gian là dưới một mili giây trong Postgres nhờ tra cứu điểm B-tree. Prometheus p50 cho cùng hình dạng là ~1.4 giây khi có tải — hai hệ không so sánh trực tiếp vì PromQL cũng làm downsample và bổ gián đoạn, nhưng độ trễ tra cứu thô thuận lợi cho Postgres.
 - **Goi và điều khoản SQL tùy ý.** PromQL là một ngôn ngữ kín; Postgres cho phép bạn nối metrics với bất cứ thứ gì khác trong cơ sở dữ liệu của bạn.
 
 ## Vật Prometheus thực sự thắng
@@ -74,7 +76,7 @@ Tôi tăng tốc độ truy vấn từ 200 → 2,000 req/s bằng k6 (ramping-ar
 1. **Đồng bộ tổng không được xác thực.** Tổng Prometheus (154M) so với Postgres (452M) chênh khoảng 3×. Tôi cố ý không claims đồng bộ tổng; số lượng mẫu khớp trong khoảng 0.6% (-800 trong 144,000). Khoảng cách tổng chưa được giải thích trong lần chạy này và được ghi lại làm chẩn đoán chỉ.
 2. **Prometheus mất 0.6% mẫu** (143,200 so với 144,000). Đã ghi lại, không giấu.
 3. **Chưa compact.** Cửa sổ 45 phút dưới ngưỡng compact của Prometheus (~3h trải head), nên con số đĩa phản ánh khối head, không phải khối ổ cứng ổn định.
-4. **CPU/RAM không có trong báo cáo này.** Môi trường CI không thể hiển thị chỉ số_container cAdvisor cho runner; các chỉ số này vẫn đi đến Grafana Cloud nhưng không có trong số được công bố.
+4. **CPU/RAM không có trong báo cáo này.** Môi trường CI không thể hiển thị chỉ số_container cAdvisor cho runner; các chỉ số này vẫn đi đến Grafana Cloud nhưng không có trong số được công bố. Đường cong dữ liệu có sẵn trên Cloud gắn thẻ `run_id="gh-219.1"`.
 
 ## Kết luận ngắn gọn
 
@@ -86,7 +88,7 @@ Tôi tăng tốc độ truy vấn từ 200 → 2,000 req/s bằng k6 (ramping-ar
 | Phần trăm trong khoảng | PostgreSQL | Sắp xếp trong cơ sở dữ liệu, không giới hạn mẫu |
 | Đặt lại counter / `rate()` | Prometheus | Dữ liệu đã được sắp xếp khi ghi |
 | SQL tùy ý / nối | PostgreSQL | Khả năng biểu thị SQL đầy đủ |
-| Khoảng thời gian ngắn | PostgreSQL | Ít tệp, lập kế hoạch truy vấn tốt hơn |
+| Khoảng thời gian ngắn | Gần như ngang nhau | Đo được: norm 0.5ms so với Prometheus 0.75ms cho một chuỗi duy nhất qua 15 phút |
 
 ## Kết luận
 
@@ -96,4 +98,4 @@ PostgreSQL chiến thắng khi bạn cần sự linh hoạt SQL, phần trăm tr
 
 ---
 
-*Phương pháp: tất cả các số từ một lần chạy quy trình GitHub Actions duy nhất (scale=pg), Prometheus 3.15.0 vs PostgreSQL 18.6, mỗi hệ được giới hạn ở 1.5 CPU / 4 GB. Phiên bản tái hiện đầy đủ trong `benchctl/`.*
+*Phương pháp: tất cả các số từ một lần chạy quy trình GitHub Actions duy nhất (scale=pg, run `gh-219.1`), Prometheus 3.15.0 vs PostgreSQL 18.6, mỗi hệ được giới hạn ở 1.5 CPU / 4 GB. Phiên bản tái hiện đầy đủ trong `benchctl/`. Đường cong dữ liệu trên Grafana Cloud gắn thẻ `run_id="gh-219.1"`.*
