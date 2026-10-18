@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+results/
+plan.json
+compose.gen.json
+docker-compose.gen.yml
+*.egg-info/

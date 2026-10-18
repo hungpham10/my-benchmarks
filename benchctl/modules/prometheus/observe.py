@@ -12,8 +12,12 @@ Both print {"server_requests": N} or {"samples": N, "sum": X} as JSON, last line
 import json
 import os
 import re
+import sys
 import urllib.request
 import urllib.parse
+
+SHARED = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "shared")
 
 SUT = os.environ.get("SUT_URL", "http://localhost:19090")
 QUERY_URL = SUT + "/api/v1/query"
@@ -38,7 +42,7 @@ def server_requests():
 
 
 def _read_dataset():
-    """Read dataset.json and return (window_minutes, t_end_ms)."""
+    """Read dataset.json and return (window_minutes, t_start_ms, t_end_ms)."""
     results_dir = os.environ.get(
         "RESULTS_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
@@ -46,8 +50,8 @@ def _read_dataset():
     if os.path.exists(ds_path):
         with open(ds_path) as f:
             m = json.load(f)
-            return m.get("window_minutes", 45), m.get("t_end_ms", 0)
-    return 45, 0
+            return (m.get("window_minutes", 45), m.get("t_start_ms", 0), m.get("t_end_ms", 0))
+    return 45, 0, 0
 
 
 def sample_stats():
@@ -56,7 +60,7 @@ def sample_stats():
     - samples: count of http_requests_total samples over the window
     - sum: sum of last value per series (counter state at window end)
     """
-    window_min, t_end_ms = _read_dataset()
+    window_min, t_start_ms, t_end_ms = _read_dataset()
     # Count of samples - use range query at t_end_ms to capture full window
     q = f"sum(count_over_time(http_requests_total[{window_min}m]))"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
@@ -84,9 +88,34 @@ def sample_stats():
     return {"samples": count, "sum": sum_val}
 
 
+def qbench():
+    """Measure latency for each query in shared/queries.py via Prometheus API.
+
+    Runs every q1-q5 PromQL against /api/v1/query at t_end_ms (instant query,
+    explicit time so future-dated data is visible). Returns JSON dict keyed by
+    query name with p50/p95/max ms plus iteration count.
+    """
+    sys.path.insert(0, SHARED)
+    from querybench import run_all
+
+    _, t_start_ms, t_end_ms = _read_dataset()
+
+    def exec_fn(name, promql):
+        url = QUERY_URL + "?query=" + urllib.parse.quote(promql)
+        if t_end_ms:
+            url += f"&time={t_end_ms / 1000}"
+        with urllib.request.urlopen(url, timeout=120) as r:
+            json.load(r)  # must return 200; any error surfaces as failure
+
+    results = run_all(exec_fn, t_start_ms, t_end_ms, "prometheus")
+    print(json.dumps(results))
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "stats":
         print(json.dumps(sample_stats()))
+    elif len(sys.argv) > 1 and sys.argv[1] == "qbench":
+        qbench()
     else:
         print(json.dumps(server_requests()))
