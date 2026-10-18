@@ -411,6 +411,23 @@ def main():
         print(f"[benchctl] disk: {disk} B "
               f"({disk / disk_samples:.2f} B/sample)", flush=True)
 
+        print("[benchctl] query sweep q1-q5", flush=True)
+        qbench_env = {**init_env}
+        if module == "postgres":
+            qbench_env["VARIANT"] = variant
+        qbench_env["RESULTS_DIR"] = RESULTS
+        out = subprocess.run(
+            [sys.executable, f"modules/{module}/observe.py", "qbench"],
+            cwd=ROOT, env={**os.environ, **qbench_env},
+            capture_output=True, text=True)
+        if out.returncode != 0:
+            print(out.stderr[-3000:])
+            raise RuntimeError("query bench failed")
+        qres = json.loads(out.stdout.strip().splitlines()[-1])
+        json.dump({"module": system, "run_id": run_id, **qres},
+                  open(os.path.join(RESULTS, f"queries-{slug}.json"), "w"), indent=1)
+        print(f"[benchctl] query sweep done: {len(qres)} queries", flush=True)
+
         print("[benchctl] k6 ramp", flush=True)
         # The k6 image runs as its own uid, which is not the runner's uid on
         # Linux (Docker Desktop on macOS masks this). Without group-writable

@@ -23,6 +23,9 @@ PG_DSN = os.environ.get(
 )
 PG_PORT = os.environ.get("PG_PORT", "15432")
 
+SHARED = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "shared")
+
 
 def _rewrite_dsn(dsn: str, port: str) -> str:
     """Rewrite DSN to use localhost:mapped_port instead of container hostname."""
@@ -118,12 +121,59 @@ def sample_stats(variant=None):
     return {"samples": count, "sum": sum_val}
 
 
+def _read_dataset():
+    """Read dataset.json and return (window_minutes, t_start_ms, t_end_ms)."""
+    results_dir = os.environ.get(
+        "RESULTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "results"))
+    ds_path = os.path.join(results_dir, "dataset.json")
+    if os.path.exists(ds_path):
+        with open(ds_path) as f:
+            m = json.load(f)
+        return (m.get("window_minutes", 45), m.get("t_start_ms", 0), m.get("t_end_ms", 0))
+    return 45, 0, 0
+
+
+def qbench(variant=None):
+    """Measure latency for each query in shared/queries.py via psycopg SQL.
+
+    Runs every q1-q5 SQL against the appropriate table (metrics_jsonb or
+    metrics_norm_brin) with the benchmark time window substituted. Returns
+    JSON dict keyed by query name with p50/p95/max ms plus iteration count.
+    """
+    import sys
+    sys.path.insert(0, SHARED)
+    from querybench import run_all
+
+    if variant is None:
+        variant = os.environ.get("VARIANT", "jsonb")
+
+    dsn = _rewrite_dsn(PG_DSN, PG_PORT)
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        _, t_start_ms, t_end_ms = _read_dataset()
+
+        def exec_fn(name, sql):
+            cur = conn.cursor()
+            cur.execute(sql)
+            cur.fetchall()  # consume results so timing includes data transfer
+            cur.close()
+
+        results = run_all(exec_fn, t_start_ms, t_end_ms, variant)
+    finally:
+        conn.close()
+    print(json.dumps(results))
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "stats":
         variant = os.environ.get("VARIANT", "jsonb")
         if len(sys.argv) > 2:
             variant = sys.argv[2]
         print(json.dumps(sample_stats(variant)))
+    elif len(sys.argv) > 1 and sys.argv[1] == "qbench":
+        variant = sys.argv[2] if len(sys.argv) > 2 else None
+        qbench(variant)
     else:
         # When run standalone, use QUERY_MARKER from env if set.
         filter_sql = os.environ.get("QUERY_MARKER")

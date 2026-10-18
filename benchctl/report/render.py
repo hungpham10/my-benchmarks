@@ -117,6 +117,87 @@ def render_resource(resources):
     return "\n".join(out)
 
 
+def render_queries(query_files):
+    """Render per-query latency table across all systems.
+
+    Each queries-<slug>.json holds {query_name: {intent, winner_expected,
+    promql, n, errors, p50_ms, p95_ms, max_ms, error}}.
+    """
+    out = ["## Query Latency (q1–q5, measured)"]
+    if not query_files:
+        out.append("No query latency data available.")
+        return "\n".join(out)
+
+    all_results = {}
+    for f in sorted(query_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        module = d.get("module", "unknown")
+        all_results[module] = d
+
+    if not all_results:
+        out.append("No query data.")
+        return "\n".join(out)
+
+    # Collect query names from the first result (skip module/run_id keys).
+    first = next(iter(all_results.values()))
+    query_names = [k for k in first.keys() if k not in ("module", "run_id")]
+
+    def cell(d, qname, field):
+        v = d.get(qname, {}).get(field)
+        if v is None:
+            return "—"
+        if field in ("p50_ms", "p95_ms", "max_ms"):
+            return f"{v:.1f}"
+        return str(v)
+
+    # p50 table
+    out.append("| Query | Prometheus p50 ms | Postgres JSONB p50 ms | Postgres Norm p50 ms |")
+    out.append("|-------|-------------------|----------------------|---------------------|")
+    for qname in query_names:
+        row = [qname]
+        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+            row.append(cell(all_results.get(mod, {}), qname, "p50_ms"))
+        out.append("| " + " | ".join(row) + " |")
+    out.append("")
+
+    # p95 table
+    out.append("| Query | Prometheus p95 ms | Postgres JSONB p95 ms | Postgres Norm p95 ms |")
+    out.append("|-------|-------------------|----------------------|---------------------|")
+    for qname in query_names:
+        row = [qname]
+        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+            row.append(cell(all_results.get(mod, {}), qname, "p95_ms"))
+        out.append("| " + " | ".join(row) + " |")
+    out.append("")
+
+    # Expected winner vs measured
+    out.append("| Query | Expected winner | Measured fastest | Notes |")
+    out.append("|-------|-----------------|------------------|-------|")
+    for qname in query_names:
+        expected = first[qname].get("winner_expected", "—")
+        # Find which system had lowest p50 (among those that completed)
+        best = None
+        best_ms = float("inf")
+        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+            d = all_results.get(mod, {})
+            ms = d.get(qname, {}).get("p50_ms")
+            if ms is not None and ms < best_ms:
+                best_ms = ms
+                best = mod
+        best_label = best or "—"
+        row = [qname, str(expected), best_label]
+        notes = []
+        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+            d = all_results.get(mod, {}).get(qname, {})
+            if d.get("error"):
+                notes.append(f"{mod}: {d['error']}")
+            elif d.get("errors", 0) > 0:
+                notes.append(f"{mod}: {d['errors']} failed iters")
+        out.append("| " + " | ".join(row + ["; ".join(notes) if notes else "ok"]) + " |")
+    out.append("")
+    return "\n".join(out)
+
+
 def render_caveats(stats_files, disk_files=None):
     """Data-driven caveats: what was actually measured, not boilerplate."""
     out = ["## Caveats"]
@@ -186,6 +267,10 @@ def main():
     resources = load_all("resource")
     if resources:
         lines.append(render_resource(resources))
+
+    query_files = [f for f in os.listdir(RESULTS) if f.startswith("queries-")]
+    if query_files:
+        lines.append(render_queries(query_files))
 
     stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
     if stats_files:
