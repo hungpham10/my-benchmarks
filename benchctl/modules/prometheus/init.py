@@ -40,9 +40,10 @@ def _read_dataset_timestamps():
 
 
 def init(ahead_minutes=8):
-    # Only ingest counter metric (http_requests_total) to match Postgres
+    # Ingest both metric families (counter http_requests_total + gauge
+    # queue_depth) so q1–q5 all run on real data, matching Postgres loaders.
     all_series = d.build_series()
-    series = [s for s in all_series if d.is_counter(s)]
+    series = all_series
     t_start_ms, t_end_ms = _read_dataset_timestamps()
     timestamps = v.generate_timestamps(t_start_ms)
     parsed = urlparse(PROM_URL)
@@ -112,7 +113,7 @@ def stop_load():
         with open(ds_path) as f:
             window_min = json.load(f).get("window_minutes", 45)
     with urllib.request.urlopen(
-            PROM_URL + f"/api/v1/query?query=count(count_over_time(http_requests_total[{window_min}m]))", timeout=60) as r:
+            PROM_URL + f"/api/v1/query?query=count(count_over_time(http_requests_total[{window_min}m]))+count(count_over_time(queue_depth[{window_min}m]))", timeout=60) as r:
         data = json.load(r)
     return {"series_present": int(data["data"]["result"][0]["value"][1])}
 

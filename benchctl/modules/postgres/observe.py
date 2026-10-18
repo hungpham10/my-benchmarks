@@ -163,8 +163,10 @@ def qbench(variant=None):
         def exec_fn(name, sql):
             cur = conn.cursor()
             cur.execute(sql)
-            cur.fetchall()  # consume results so timing includes data transfer
+            rows = cur.fetchall()  # consume results so timing includes data transfer
+            n = len(rows)
             cur.close()
+            return n
 
         results = run_all(exec_fn, t_start_ms, t_end_ms, backend)
     finally:

@@ -57,23 +57,25 @@ def _read_dataset():
 def sample_stats():
     """Return {'samples': count, 'sum': value} from Prometheus query API.
 
-    - samples: count of http_requests_total samples over the window
-    - sum: sum of last value per series (counter state at window end)
+    - samples: count of all samples over the window across both metric families
+      (http_requests_total counter + queue_depth gauge), matching Postgres loaders.
+    - sum: sum of last value per series (counter state at window end).
     """
     window_min, t_start_ms, t_end_ms = _read_dataset()
-    # Count of samples - use range query at t_end_ms to capture full window
-    q = f"sum(count_over_time(http_requests_total[{window_min}m]))"
-    url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
-    if t_end_ms:
-        url_q += f"&time={t_end_ms / 1000}"
-    with urllib.request.urlopen(url_q, timeout=30) as r:
-        data = json.load(r)
-    res = data["data"]["result"]
-    count = int(float(res[0]["value"][1])) if res else 0
+    total_count = 0
+    for metric in ("http_requests_total", "queue_depth"):
+        # Count of samples - use range query at t_end_ms to capture full window
+        q = f"sum(count_over_time({metric}[{window_min}m]))"
+        url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
+        if t_end_ms:
+            url_q += f"&time={t_end_ms / 1000}"
+        with urllib.request.urlopen(url_q, timeout=30) as r:
+            data = json.load(r)
+        res = data["data"]["result"]
+        count = int(float(res[0]["value"][1])) if res else 0
+        total_count += count
 
     # Sum of last value per series (counter end state) - evaluate at t_end_ms
-    # Query each series' current value at t_end_ms and sum client-side, to
-    # avoid any PromQL aggregation quirks with future-dated data.
     q = f"http_requests_total"
     url_q = QUERY_URL + "?query=" + urllib.parse.quote(q)
     if t_end_ms:
@@ -85,7 +87,7 @@ def sample_stats():
     for sample in res:
         sum_val += float(sample["value"][1])
 
-    return {"samples": count, "sum": sum_val}
+    return {"samples": total_count, "sum": sum_val}
 
 
 def qbench():
@@ -105,7 +107,9 @@ def qbench():
         if t_end_ms:
             url += f"&time={t_end_ms / 1000}"
         with urllib.request.urlopen(url, timeout=120) as r:
-            json.load(r)  # must return 200; any error surfaces as failure
+            data = json.load(r)
+        res = data.get("data", {}).get("result", [])
+        return len(res)
 
     results = run_all(exec_fn, t_start_ms, t_end_ms, "prometheus")
     print(json.dumps(results))

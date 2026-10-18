@@ -4,6 +4,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared"))
+import queries as Q  # noqa: E402  (LABELS map for display names)
+
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 OUT = os.path.join(RESULTS, "report.md")
@@ -142,6 +145,12 @@ def render_queries(query_files):
     first = next(iter(all_results.values()))
     query_names = [k for k in first.keys() if k not in ("module", "run_id")]
 
+    # Build module list from actual result keys (not hardcoded wrong keys),
+    # keyed to Q.LABELS display names. Unknown modules fall back to raw key.
+    mods = sorted(all_results.keys())
+    def mod_label(m):
+        return Q.LABELS.get(m, m)
+
     def cell(d, qname, field):
         v = d.get(qname, {}).get(field)
         if v is None:
@@ -150,49 +159,59 @@ def render_queries(query_files):
             return f"{v:.1f}"
         return str(v)
 
+    def q_empty(qname, mod):
+        return all_results.get(mod, {}).get(qname, {}).get("empty", False)
+
+    def q_p50(qname, mod):
+        return all_results.get(mod, {}).get(qname, {}).get("p50_ms")
+
     # p50 table
-    out.append("| Query | Prometheus p50 ms | Postgres JSONB p50 ms | Postgres Norm p50 ms |")
-    out.append("|-------|-------------------|----------------------|---------------------|")
+    out.append("| Query | " + " | ".join(f"{mod_label(m)} p50 ms" for m in mods) + " |")
+    out.append("|-------|" + "|".join("----" for _ in mods) + "|")
     for qname in query_names:
         row = [qname]
-        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+        for mod in mods:
             row.append(cell(all_results.get(mod, {}), qname, "p50_ms"))
         out.append("| " + " | ".join(row) + " |")
     out.append("")
 
     # p95 table
-    out.append("| Query | Prometheus p95 ms | Postgres JSONB p95 ms | Postgres Norm p95 ms |")
-    out.append("|-------|-------------------|----------------------|---------------------|")
+    out.append("| Query | " + " | ".join(f"{mod_label(m)} p95 ms" for m in mods) + " |")
+    out.append("|-------|" + "|".join("----" for _ in mods) + "|")
     for qname in query_names:
         row = [qname]
-        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+        for mod in mods:
             row.append(cell(all_results.get(mod, {}), qname, "p95_ms"))
         out.append("| " + " | ".join(row) + " |")
     out.append("")
 
-    # Expected winner vs measured
+    # Expected winner vs measured fastest (skip empty queries — latency on an
+    # empty result set is meaningless overhead, not a real measurement).
     out.append("| Query | Expected winner | Measured fastest | Notes |")
     out.append("|-------|-----------------|------------------|-------|")
     for qname in query_names:
         expected = first[qname].get("winner_expected", "—")
-        # Find which system had lowest p50 (among those that completed)
         best = None
         best_ms = float("inf")
-        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+        for mod in mods:
             d = all_results.get(mod, {})
+            if d.get(qname, {}).get("empty"):
+                continue
             ms = d.get(qname, {}).get("p50_ms")
             if ms is not None and ms < best_ms:
                 best_ms = ms
                 best = mod
-        best_label = best or "—"
+        best_label = mod_label(best) if best else "— (all empty)"
         row = [qname, str(expected), best_label]
         notes = []
-        for mod in ["prometheus", "postgres-jsonb", "postgres-metrics_norm_brin"]:
+        for mod in mods:
             d = all_results.get(mod, {}).get(qname, {})
-            if d.get("error"):
-                notes.append(f"{mod}: {d['error']}")
+            if d.get("empty"):
+                notes.append(f"{mod_label(mod)}: empty result (0 rows)")
+            elif d.get("error"):
+                notes.append(f"{mod_label(mod)}: {d['error']}")
             elif d.get("errors", 0) > 0:
-                notes.append(f"{mod}: {d['errors']} failed iters")
+                notes.append(f"{mod_label(mod)}: {d['errors']} failed iters")
         out.append("| " + " | ".join(row + ["; ".join(notes) if notes else "ok"]) + " |")
     out.append("")
     return "\n".join(out)
