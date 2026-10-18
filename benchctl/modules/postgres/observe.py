@@ -74,11 +74,17 @@ def sample_stats(variant=None):
 
     variant: "jsonb" or "norm" — determines which table to query.
     If not provided, infers from VARIANT env var or tries both.
-    
+
     Returns:
-    - samples: count of all http_requests_total rows
-    - sum: sum of LAST value per series (matching Prometheus's sum(http_requests_total))
+    - samples: count of all rows (counter + gauge), matching Prometheus's
+      count across both metric families
+    - sum: sum of LAST value per series for the COUNTER metric only, which
+      matches Prometheus's sum(http_requests_total) and keeps the two
+      comparable now that the gauge metric is also loaded.
     """
+    sys.path.insert(0, SHARED)
+    from dataset import COUNTER_METRIC
+
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)
     conn = psycopg.connect(dsn, autocommit=True)
     cur = conn.cursor()
@@ -91,12 +97,14 @@ def sample_stats(variant=None):
         # Count all rows
         cur.execute(f"SELECT count(*) FROM {table}")
         count = int(cur.fetchone()[0] or 0)
-        # Sum of last value per series_id
+        # Sum of last counter value per series_id (counter metric only).
         cur.execute(f"""
             SELECT sum(last_val) FROM (
-                SELECT DISTINCT ON (series_id) value AS last_val
-                FROM {table}
-                ORDER BY series_id, time DESC
+                SELECT DISTINCT ON (m.series_id) m.value AS last_val
+                FROM {table} m
+                JOIN series_dim s ON s.id = m.series_id
+                WHERE s.metric = '{COUNTER_METRIC}'
+                ORDER BY m.series_id, m.time DESC
             ) sub
         """)
         sum_val = float(cur.fetchone()[0] or 0.0)
@@ -105,11 +113,12 @@ def sample_stats(variant=None):
         # Count all rows
         cur.execute(f"SELECT count(*) FROM {table}")
         count = int(cur.fetchone()[0] or 0)
-        # Sum of last value per labels (series)
+        # Sum of last counter value per series (counter metric only).
         cur.execute(f"""
             SELECT sum(last_val) FROM (
                 SELECT DISTINCT ON (labels) value AS last_val
                 FROM {table}
+                WHERE labels @> '{{"__name__":"{COUNTER_METRIC}"}}'
                 ORDER BY labels, time DESC
             ) sub
         """)
