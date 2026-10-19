@@ -64,8 +64,59 @@ Dataset là 2 job × 400 instance × 2 họ metric, tức 1,600 series. Mỗi se
 
 Kiểm tra parity: Prometheus giữ 286,400 sample, Postgres giữ 288,000, chênh 0.56%, nằm trong ngưỡng 2% tôi đặt cho cổng kiểm tra. Tôi cũng so tổng, nhưng chỉ để chẩn đoán. Instant query của PromQL và `DISTINCT ON` của Postgres hiểu "giá trị cuối" khác nhau, nên hai tổng chênh khoảng 3× và con số đó không nói gì về chất lượng dữ liệu.
 
-## Đĩa
+## Schema Postgres
 
+"Có dùng Postgres cho metrics" có thể nghĩa là nhiều kiểu bảng rất khác nhau, nên tôi chạy hai kiểu. Nếu cả hai đều thua, kết quả nói về Postgres; nếu chỉ một kiểu thua, kết quả nói về schema.
+
+```sql
+-- Schema 1: label nằm trong một document. Kiểu đa số team viết trước.
+CREATE TABLE metrics_jsonb (
+    time    timestamptz      NOT NULL,
+    labels  jsonb            NOT NULL,
+    value   double precision NOT NULL
+) PARTITION BY RANGE (time);
+
+CREATE INDEX metrics_jsonb_labels_idx ON metrics_jsonb USING gin (labels jsonb_path_ops);
+CREATE INDEX metrics_jsonb_time_idx   ON metrics_jsonb (time);
+
+-- Schema 2: identity ở bảng riêng, BRIN trên time.
+CREATE TABLE series_dim (
+    id       int  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    metric   text NOT NULL,
+    job      text NOT NULL,
+    instance text NOT NULL,
+    region   text NOT NULL,
+    service  text NOT NULL,
+    UNIQUE (metric, job, instance)
+);
+
+CREATE TABLE metrics_norm_brin (
+    time      timestamptz      NOT NULL,
+    series_id int              NOT NULL,
+    value     double precision NOT NULL
+) PARTITION BY RANGE (time);
+
+CREATE INDEX metrics_norm_brin_time_brin_idx
+    ON metrics_norm_brin USING brin (time) WITH (pages_per_range = 32);
+CREATE INDEX metrics_norm_brin_series_time_idx
+    ON metrics_norm_brin (series_id, time);
+```
+
+Cả hai bảng cha đều partition theo ngày trên `time`. Loader tạo partition lúc chạy, vì dataset được đánh dấu thời gian ở tương lai và `initdb` chỉ thấy một `PGDATA` rỗng.
+
+Schema đầu là kiểu đa số team chọn: một row mỗi sample, toàn bộ identity của series trong một document JSON, GIN cho containment. Nó cũng là kiểu lưu `env="production"` lặp lại trên từng row.
+
+Schema thứ hai là mức tốt nhất Postgres làm được cho access pattern này: `series_id` 4 byte thay cho label text, BRIN trên time vì sample chỉ append và gần như theo thứ tự thời gian, và btree trên `(series_id, time)` cho các tra cứu một series. BRIN là câu trả lời bản địa của Postgres cho dữ liệu append-only: nó lưu min/max theo từng page range và tốn kilobytes thay vì megabytes. Nó có giúp được ở đây hay không là một trong những thứ run này đo.
+
+### Cách tôi gửi truy vấn
+
+Cả năm hình dạng chạy trên hai schema và trên Prometheus, từ `benchctl/shared/queries.py`. Ba chi tiết quan trọng khi đọc số:
+
+- **Cửa sổ tường minh.** Mọi câu SQL đều có `time BETWEEN %s AND %s`, điền từ `results/dataset.json`. Không có gì mặc định về `now()`, vì dữ liệu ở tương lai. q5 đổi đầu cuối thành `start + 15 phút`, nên nó đo khoảng ngắn thay vì lặp lại q4.
+- **Tham số phía client.** `psycopg3` nội suy `%s` trong Python và không hiểu `$1` của PostgreSQL; truyền tham số cạnh `$1` sẽ lỗi "the query has 0 placeholders but 2 parameters were passed". Dấu `%s` là chi tiết của harness, không phải lựa chọn hiệu năng.
+- **Lấy toàn bộ kết quả.** Mỗi lượt gọi `fetchall()`, nên latency gồm cả việc truyền row chứ không chỉ thực thi plan.
+
+## Đĩa
 | Hệ thống | Sample giữ lại | Trên đĩa | Bytes / sample |
 |--------|--------------|---------|----------------|
 | Prometheus TSDB | 286,400 | 3.3 MB | 12.18 |
@@ -125,9 +176,56 @@ Các nhãn q1–q5 chỉ là tên gọi. Đây là chính xác mỗi cái chạy
 | q4 | Queue depth trung bình của `job-00`, toàn cửa sổ | `sum(queue_depth{job="job-00"})` | `avg(value)` với `job = 'job-00'` |
 | q5 | Một instance, 15 phút cuối | `queue_depth{instance="host-0000"}` | `avg(value)` với `instance = 'host-0000'` |
 
-Schema JSONB chạy cùng câu SQL nhưng trên một document `labels` (`labels->>'job'`, `labels @> '{"__name__":...}'`) thay vì join `series_dim`.
+Schema JSONB chạy cùng năm hình dạng nhưng trên một document `labels`: `labels @> '{"__name__":"queue_depth"}'` để lọc, `labels->>'job'` để nhóm, và với q1 là `PARTITION BY labels`, vì cả document là identity duy nhất mà bảng đó có.
 
-Bảng này cũng cho thấy một điểm không đối xứng. Prometheus chạy mỗi PromQL như một instant query ở cuối cửa sổ; Postgres gộp trên cả cửa sổ. Với q1, Prometheus đọc 5 phút cuối còn Postgres đi hết 45 phút. Nên đây là so chi phí của hình dạng trên mỗi engine, không phải so hai bên quét cùng số row. Chỗ nào điều đó làm thay đổi cách đọc, tôi nói rõ.
+SQL thực tế nó chạy trên schema chuẩn hóa:
+
+```sql
+-- q1: counter rate
+WITH d AS (
+  SELECT m.time, m.value AS v,
+         lag(m.value) OVER (PARTITION BY m.series_id ORDER BY m.time) AS prev
+  FROM metrics_norm_brin m
+  JOIN series_dim s ON s.id = m.series_id
+  WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+    AND s.metric = 'http_requests_total'
+)
+SELECT sum(v - prev + CASE WHEN v < prev THEN prev ELSE 0 END) AS rate
+FROM d WHERE prev IS NOT NULL;
+
+-- q2: sum theo job
+SELECT s.job, avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth'
+GROUP BY 1 ORDER BY 1;
+
+-- q3: p90 mỗi instance
+SELECT s.instance,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.job = 'job-00'
+GROUP BY 1 ORDER BY 1;
+
+-- q4: một job, toàn cửa sổ
+SELECT avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.job = 'job-00';
+
+-- q5: một instance, 15 phút
+SELECT avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.instance = 'host-0000';
+```
+
+Bảng này cũng cho thấy một điểm không đối xứng. Prometheus chạy mỗi PromQL như một instant query ở cuối cửa sổ; Postgres gộp trên cả cửa sổ. Với q1, Prometheus đọc 5 phút cuối còn Postgres đi hết 45 phút, và câu SQL trả về tổng tăng trong cả cửa sổ trong khi `rate()` trả về giá trị mỗi giây tại một thời điểm. Có chỗ hàm gộp cũng khác: q2 và q4 dùng `avg` trong SQL còn PromQL dùng `sum`. Nên đây là so chi phí của hình dạng trên mỗi engine, không phải so hai bên quét cùng số row hay trả về cùng một con số. Parity sample count được kiểm tra riêng.
 
 ## Độ trễ truy vấn
 

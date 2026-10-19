@@ -65,6 +65,58 @@ The dataset is 2 jobs × 400 instances × 2 metric families, which makes 1,600 s
 
 Parity check: Prometheus kept 286,400 samples and Postgres kept 288,000, a 0.56% difference, inside the 2% tolerance I set for the gate. I also compare sums, but only as a diagnostic. PromQL's instant query and Postgres's `DISTINCT ON` mean different things by "last value", so the sums differ by about 3× and that tells me nothing about data quality.
 
+## The Postgres schemas
+
+"Use Postgres for metrics" can mean very different table designs, so I ran two. If both lose, the result is about Postgres; if only one loses, it is about the schema.
+
+```sql
+-- Schema 1: labels as a document. The layout most teams write first.
+CREATE TABLE metrics_jsonb (
+    time    timestamptz      NOT NULL,
+    labels  jsonb            NOT NULL,
+    value   double precision NOT NULL
+) PARTITION BY RANGE (time);
+
+CREATE INDEX metrics_jsonb_labels_idx ON metrics_jsonb USING gin (labels jsonb_path_ops);
+CREATE INDEX metrics_jsonb_time_idx   ON metrics_jsonb (time);
+
+-- Schema 2: identity in its own table, BRIN on time.
+CREATE TABLE series_dim (
+    id       int  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    metric   text NOT NULL,
+    job      text NOT NULL,
+    instance text NOT NULL,
+    region   text NOT NULL,
+    service  text NOT NULL,
+    UNIQUE (metric, job, instance)
+);
+
+CREATE TABLE metrics_norm_brin (
+    time      timestamptz      NOT NULL,
+    series_id int              NOT NULL,
+    value     double precision NOT NULL
+) PARTITION BY RANGE (time);
+
+CREATE INDEX metrics_norm_brin_time_brin_idx
+    ON metrics_norm_brin USING brin (time) WITH (pages_per_range = 32);
+CREATE INDEX metrics_norm_brin_series_time_idx
+    ON metrics_norm_brin (series_id, time);
+```
+
+Both parents are partitioned by day on `time`. The loader creates the partitions at run time, because the dataset is timestamped in the future and `initdb` only sees an empty `PGDATA`.
+
+The first schema is the one most teams reach for: a row per sample, the whole series identity in a JSON document, GIN for containment. It is also the one that stores `env="production"` again on every row.
+
+The second is the best Postgres can do for this access pattern: a 4-byte `series_id` instead of the label text, BRIN on time because samples are append-only and roughly time-ordered, and a btree on `(series_id, time)` for the per-series lookups. BRIN is the Postgres-native answer to append-only data: it stores min/max per page range and costs kilobytes rather than megabytes. Whether it helps here is one of the things the run measures.
+
+### How the queries are issued
+
+All five shapes run on both schemas and on Prometheus, from `benchctl/shared/queries.py`. Three details matter for reading the numbers:
+
+- **Explicit windows.** Every SQL query has `time BETWEEN %s AND %s`, filled from `results/dataset.json`. Nothing defaults to `now()`, because the data is in the future. q5 overrides the end to `start + 15 minutes`, so it measures a short range instead of repeating q4.
+- **Client-side parameters.** `psycopg3` interpolates `%s` in Python and does not parse PostgreSQL's `$1`; passing parameters next to `$1` fails with "the query has 0 placeholders but 2 parameters were passed". The `%s` is a harness detail, not a performance choice.
+- **Whole result set.** Each iteration calls `fetchall()`, so the latency includes transferring the rows, not just executing the plan.
+
 ## Disk
 
 | System | Samples kept | On disk | Bytes / sample |
@@ -126,9 +178,56 @@ The labels q1–q5 are just handles. Here is what each one actually runs; every 
 | q4 | Average queue depth for `job-00`, full window | `sum(queue_depth{job="job-00"})` | `avg(value)` where `job = 'job-00'` |
 | q5 | One instance, last 15 minutes | `queue_depth{instance="host-0000"}` | `avg(value)` where `instance = 'host-0000'` |
 
-The JSONB schema runs the same SQL against one `labels` document (`labels->>'job'`, `labels @> '{"__name__":...}'`) instead of joining `series_dim`.
+The JSONB schema runs the same shapes against one `labels` document: `labels @> '{"__name__":"queue_depth"}'` for filtering, `labels->>'job'` for grouping, and for q1 `PARTITION BY labels`, since the whole document is the only identity that table has.
 
-The table also makes one asymmetry visible. Prometheus runs each PromQL as an instant query at the end of the window; Postgres aggregates across the window. For q1 that means Prometheus reads the last five minutes while Postgres walks all 45. So this compares what the shape costs on each engine, not whether the two scan the same number of rows. I point out where that changes the reading.
+The normalized-schema SQL it actually runs:
+
+```sql
+-- q1: counter rate
+WITH d AS (
+  SELECT m.time, m.value AS v,
+         lag(m.value) OVER (PARTITION BY m.series_id ORDER BY m.time) AS prev
+  FROM metrics_norm_brin m
+  JOIN series_dim s ON s.id = m.series_id
+  WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+    AND s.metric = 'http_requests_total'
+)
+SELECT sum(v - prev + CASE WHEN v < prev THEN prev ELSE 0 END) AS rate
+FROM d WHERE prev IS NOT NULL;
+
+-- q2: sum by job
+SELECT s.job, avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth'
+GROUP BY 1 ORDER BY 1;
+
+-- q3: p90 per instance
+SELECT s.instance,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.job = 'job-00'
+GROUP BY 1 ORDER BY 1;
+
+-- q4: one job, full window
+SELECT avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.job = 'job-00';
+
+-- q5: one instance, 15 minutes
+SELECT avg(m.value)
+FROM metrics_norm_brin m
+JOIN series_dim s ON s.id = m.series_id
+WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+  AND s.metric = 'queue_depth' AND s.instance = 'host-0000';
+```
+
+The table also makes one asymmetry visible. Prometheus runs each PromQL as an instant query at the end of the window; Postgres aggregates across the window. For q1 that means Prometheus reads the last five minutes while Postgres walks all 45, and the SQL returns the total increase over that window while `rate()` returns a per-second value at one instant. The aggregators differ in places too: q2 and q4 use `avg` in SQL against `sum` in PromQL. So this compares what the shape costs on each engine, not whether the two scan the same rows or return the same number. Sample-count parity is checked separately.
 
 ## Query latency
 
