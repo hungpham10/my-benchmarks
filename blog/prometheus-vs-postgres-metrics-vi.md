@@ -1,17 +1,17 @@
 ---
-title: "Prometheus vs PostgreSQL: Một Câu Hỏi Phỏng Vấn, Được Benchmark"
-date: 2026-10-18
-lastmod: 2026-10-18
+title: "Tại sao không dùng PostgreSQL cho metrics? Tôi đã benchmark"
+date: 2026-10-19
+lastmod: 2026-10-19
 tags: [prometheus, postgresql, benchmark, metrics, time-series]
-excerpt: "Một Head of Platform từng hỏi tại sao Prometheus hay InfluxDB lại tốt hơn PostgreSQL cho metrics. Tôi trả lời 'PostgreSQL cũng làm được.' Đó là cái bẫy. Tôi đã benchmark cả ba trên cùng dữ liệu. Dưới đây là số đo thực."
+excerpt: "Trong một buổi phỏng vấn, Head of Platform hỏi tôi tại sao không dùng PostgreSQL cho metrics. Tôi trả lời bằng lý thuyết và không có con số nào chống lưng. Nên tôi đã chạy benchmark."
 ---
 
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  "headline": "Prometheus vs PostgreSQL: Một Câu Hỏi Phỏng Vấn, Được Benchmark",
-  "description": "Một Head of Platform từng hỏi tại sao Prometheus hay InfluxDB lại tốt hơn PostgreSQL cho metrics. Tôi đã benchmark cả ba trên cùng dữ liệu. Dưới đây là số đo thực.",
+  "headline": "Tại sao không dùng PostgreSQL cho metrics? Tôi đã benchmark",
+  "description": "Trong một buổi phỏng vấn, Head of Platform hỏi tôi tại sao không dùng PostgreSQL cho metrics. Tôi trả lời bằng lý thuyết và không có con số nào chống lưng. Nên tôi đã chạy benchmark.",
   "author": {
     "@type": "Person",
     "name": "Platform Engineering Team"
@@ -20,8 +20,8 @@ excerpt: "Một Head of Platform từng hỏi tại sao Prometheus hay InfluxDB 
     "@type": "Organization",
     "name": "Platform Engineering Blog"
   },
-  "datePublished": "2026-10-18",
-  "dateModified": "2026-10-18",
+  "datePublished": "2026-10-19",
+  "dateModified": "2026-10-19",
   "mainEntityOfPage": {
     "@type": "WebPage",
     "@id": "https://example.com/blog/prometheus-vs-postgres-metrics-vi"
@@ -31,180 +31,250 @@ excerpt: "Một Head of Platform từng hỏi tại sao Prometheus hay InfluxDB 
 }
 </script>
 
-<meta property="og:title" content="Prometheus vs PostgreSQL: Một Câu Hỏi Phỏng Vấn, Được Benchmark">
-<meta property="og:description" content="Một Head of Platform từng hỏi tại sao Prometheus hay InfluxDB lại tốt hơn PostgreSQL cho metrics. Tôi đã benchmark cả ba trên cùng dữ liệu. Dưới đây là số đo thực.">
+<meta property="og:title" content="Tại sao không dùng PostgreSQL cho metrics? Tôi đã benchmark">
+<meta property="og:description" content="Trong một buổi phỏng vấn, Head of Platform hỏi tôi tại sao không dùng PostgreSQL cho metrics. Tôi trả lời bằng lý thuyết và không có con số nào chống lưng. Nên tôi đã chạy benchmark.">
 <meta property="og:type" content="article">
-<meta property="og:article:published_time" content="2026-10-18">
+<meta property="og:article:published_time" content="2026-10-19">
 <meta property="twitter:card" content="summary">
 
-# Prometheus vs PostgreSQL: Một Câu Hỏi Phỏng Vấn, Được Benchmark
+# Tại sao không dùng PostgreSQL cho metrics? Tôi đã benchmark
 
-## Câu hỏi tôi từng trả lời sai
+Buổi phỏng vấn là cho vị trí Platform Engineering tại một công ty tài chính tiêu dùng. Tôi chuẩn bị cho phần quen thuộc: mô tả hệ thống từng xây, bảo vệ một trade-off. Head of Platform bỏ qua tất cả và hỏi thẳng:
 
-Trong một buổi phỏng vấn vị trí Platform Engineering tại một ngân hàng tiêu dùng (tên công ty được giấu tên), Head of Platform hỏi tôi một câu nghe có vẻ đơn giản:
+> "Tại sao không dùng PostgreSQL cho metrics?"
 
-> "Tại sao phải dùng Prometheus hay InfluxDB cho metrics, thay vì PostgreSQL?"
+Tôi trả lời bằng những gì mình hiểu lúc đó: metrics chủ yếu là append, một series được nhận diện bằng label, và dữ liệu theo thứ tự thời gian nén tốt hơn nhiều so với row. Thành thật mà nói, tôi chưa chuẩn bị cho câu này, và tôi không hiểu sâu cả hai hệ thống. Tôi cố giải thích, nhưng anh ấy vẫn chưa bị thuyết phục, và tôi không trách được. Tôi nói được mình tin gì, không nói được vì sao.
 
-Tôi đã vào cái bẫy. Tôi trả lời PostgreSQL cũng làm được — bạn có thể lưu metrics vào bảng Postgres và truy vấn bằng SQL.
+Sau buổi phỏng vấn, tôi vẫn muốn có một lý do đàng hoàng để chọn cái này thay cái kia. "Prometheus hỗ trợ sẵn mọi thứ" là câu trả lời dễ, và tôi cố ý bỏ nó ra. Bài này là những gì tôi tìm được sau vài tuần đào. Kết luận là cả hai đều có thể là lựa chọn hợp lý, tùy nhu cầu, và phần còn lại của bài chỉ ra mỗi bên hợp ở đâu.
 
-Anh ấy gật đầu. Chỉ sau đó tôi mới nhận ra câu hỏi thực sự: không phải "PostgreSQL có thể lưu metrics không", mà là "bạn biết giá trả cho sự tiện lợi đó là gì chưa?" Tôi không có câu trả lời tốt.
+Nên tôi dựng một benchmark. Cùng dữ liệu, ba store, năm hình dạng truy vấn, và mọi con số dưới đây đến từ một run CI xanh.
 
-Sau buổi phỏng vấn, tôi đã benchmark cả ba hệ thống trên cùng dữ liệu, cùng tải truy vấn, cùng khung tài nguyên. Bài viết này là câu trả lời tôi muốn đưa anh ấy — không phải ý kiến, là số đo thực.
+## Bản tóm tắt
 
-## Key Takeaways
+- **Đĩa:** Prometheus 12.18 bytes/sample, PostgreSQL chuẩn hóa 370.88, PostgreSQL JSONB 838.25. Tức là nhỏ hơn 30× và 69×.
+- **Độ trễ:** Prometheus nhanh nhất ở bốn trong năm hình dạng. Postgres chuẩn hóa thắng cái thứ năm, một series trong 15 phút (0.14 ms so với 0.52 ms).
+- **Counter rate trên cả 1,600 series:** 3.0 ms trên Prometheus, 63.9 ms trên Postgres chuẩn hóa, 874.3 ms trên JSONB. Khoảng 21× và 290×.
+- **Bão hòa:** cùng một ramp tải, Prometheus hoàn thành 169,841 truy vấn, Postgres chuẩn hóa 4,894, JSONB 443.
+- **Ghi:** Postgres COPY nạp dữ liệu trong 0.9 s (chuẩn hóa) và 2.7 s (JSONB). Prometheus mất 0.7 s ghi thật, cộng 144 s dừng mà tôi tự thêm.
+- **Chưa đo:** CPU và RAM, và một Prometheus đã compact. Nói thêm ở cuối bài.
 
-- **Disk:** Prometheus **12.68 bytes/sample** vs PostgreSQL chuẩn hóa **540.09 B/sample** vs PostgreSQL JSONB **1,024.56 B/sample**. Prometheus nhỏ hơn 43× so với Postgres chuẩn hóa và 81× so với JSONB.
-- **Ghi:** Prometheus bỏ 0.5 s ghi thật plus ~72 s pacing delay (chắn chống WAL backpressure, không phải nút điều chỉnh). PostgreSQL COPY: 0.6 s (chuẩn hóa) / 1.4 s (JSONB).
-- **Điểm phá vỡ** (k6 load test, **một hình dạng truy vấn duy nhất**: `sum(rate(http_requests_total[5m]))`, ramp 10→200→2000 req/s, ngưỡng p95 500 ms): PostgreSQL chuẩn hóa hoàn thành 469,604 iterations tại p50 0.5 ms; Prometheus hoàn thành 176,266 tại p50 1.4 s; PostgreSQL JSONB chỉ hoàn thành 278 tại p50 66 s.
-- **Năm hình dạng truy vấn đã định nghĩa:** q1–q5 được nêu trong `benchctl/shared/queries.py` với PromQL và SQL tương đương; q1 được đo qua k6, q2–q5 giờ có thể đo với phase query-sweep mới.
-- **Parity:** số lượng mẫu khớp trong 0.6% (−800/144,000, trong ngưỡng 2%). Tổng chênh ~3× và chỉ ghi làm chẩn đoán.
-- **Caveat:** Prometheus chưa compact (cửa sổ 45 phút dưới ngưỡng compact ~3 h head span), CPU/RAM chưa ghi trong CI.
+## Setup
 
-## Prometheus thực sự đã làm gì: bốn việc "từ chối"
+Dataset là 2 job × 400 instance × 2 họ metric, tức 1,600 series. Mỗi series có 180 sample, cách nhau 15 giây, nên 288,000 sample mỗi backend trong cửa sổ 45 phút. Generator có seed cố định, nên mọi lần chạy sinh ra giá trị y hệt. Mỗi store chạy trong container giới hạn 1.5 CPU và 4 GB RAM. Mọi số trong bài đến từ run `gh-232.1`.
 
-Prometheus không thắng vì có thuật toán nén tốt hơn. Nó thắng vì nó **từ chối những gì PostgreSQL làm**. Mỗi việc từ chối là một chi tiết kiến trúc có chi phí có thể đo:
+Kiểm tra parity: Prometheus giữ 286,400 sample, Postgres giữ 288,000, chênh 0.56%, nằm trong ngưỡng 2% tôi đặt cho cổng kiểm tra. Tôi cũng so tổng, nhưng chỉ để chẩn đoán. Instant query của PromQL và `DISTINCT ON` của Postgres hiểu "giá trị cuối" khác nhau, nên hai tổng chênh khoảng 3× và con số đó không nói gì về chất lượng dữ liệu.
 
-| # | Prometheus từ chối | Hệ quả kiến trúc |
-|---|-------------------|-----------------|
-| 1 | `UPDATE` / `DELETE` tại chỗ | Chỉ ghi append-only, time-ordered |
-| 2 | Một hàng mỗi sample | Label set *là* identity; không cần lặp nhãn trên mỗi dòng |
-| 3 | Chỉ mục B-tree đa mục đích | Chỉ mục inverted postings (series refs, không phải rows) |
-| 4 | Cột hiển thị MVCC | Không 23–24 B tuple header/row, không WAL cho từng sample |
+## Đĩa
 
-Hai điểm cuối chịu phần lớn khoản cách biệt bytes/sample dưới đây.
-
-## Cùng dữ liệu, cùng tải
-
-Tất cả ba hệ thống nhận cùng tập dữ liệu tổng hợp (~20k chuỗi, scrape 15s, cửa sổ 45 phút). Mỗi hệ thống chạy dưới cùng ràng buộc: **1.5 CPU / 4 GB RAM**. Mọi chạy đều verifies *sample parity* trong khoảng 2% (`failed: 0`). Tổng chỉ ghi làm chẩn đoán, không phải claim được xác thực.
-
-## Dung lượng đĩa (chart + bảng)
-
-| Hệ thống | Mẫu được giữ lại | Bytes trên đĩa | **Bytes / mẫu** |
-|--------|------------------|----------------|-----------------|
-| Prometheus TSDB | 143,200 | 1.7 MB | **12.68** |
-| PostgreSQL Chuẩn hóa | 144,000 | 74.2 MB | **540.09** |
-| PostgreSQL JSONB | 144,000 | 140.7 MB | **1,024.56** |
+| Hệ thống | Sample giữ lại | Trên đĩa | Bytes / sample |
+|--------|--------------|---------|----------------|
+| Prometheus TSDB | 286,400 | 3.3 MB | 12.18 |
+| PostgreSQL chuẩn hóa | 288,000 | 101.9 MB | 370.88 |
+| PostgreSQL JSONB | 288,000 | 230.2 MB | 838.25 |
 
 <svg role="img" aria-labelledby="chart-disk-title chart-disk-desc" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
-  <title id="chart-disk-title">Dung lượng đĩa — bytes trên mỗi mẫu</title>
-  <desc id="chart-disk-desc">Biểu đồ cột ngang so sánh bytes trên mẫu: Prometheus 12.68, PostgreSQL chuẩn hóa 540.09, PostgreSQL JSONB 1,024.56.</desc>
-  <rect x="80" y="30" width="11" height="42" fill="#10b981" rx="2"/>
-  <rect x="80" y="90" width="33" height="42" fill="#3b82f6" rx="2"/>
+  <title id="chart-disk-title">Dung lượng đĩa — bytes trên mỗi sample</title>
+  <desc id="chart-disk-desc">Biểu đồ cột ngang so sánh bytes trên sample: Prometheus 12.18, PostgreSQL chuẩn hóa 370.88, PostgreSQL JSONB 838.25.</desc>
+  <rect x="80" y="30" width="1" height="42" fill="#10b981" rx="2"/>
+  <rect x="80" y="90" width="28" height="42" fill="#3b82f6" rx="2"/>
   <rect x="80" y="150" width="64" height="42" fill="#ef4444" rx="2"/>
   <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Prometheus</text>
   <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres chuẩn hóa</text>
   <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres JSONB</text>
-  <text x="93" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">12.68</text>
-  <text x="95" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">540.09</text>
-  <text x="95" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">1,024.56</text>
+  <text x="86" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">12.18</text>
+  <text x="112" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">370.88</text>
+  <text x="148" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">838.25</text>
 </svg>
 
-### Tại sao PostgreSQL mất nhiều chỗ?
+Phần lớn khoảng cách là văn bản nhãn. JSONB lặp toàn bộ label document trên từng row, và `env="production"` bị lưu cả triệu lần vì Postgres không intern string. Schema chuẩn hóa giữ row nhỏ, nhưng vẫn mang label text trên mỗi row và index `(series_id, time)` cộng thêm trọng lượng của nó. Prometheus lưu mỗi label set một lần trong index và ghi mỗi sample như một timestamp và một value.
 
-Chi phí không nằm ở cấu trúc chỉ mục — nó nằm ở **văn bản nhãn**.
+Hai con số đó rẻ vì cách chúng được mã hóa. Timestamp dùng delta-of-delta, nên với interval scrape ổn định chúng tốn khoảng một bit mỗi cái. Value dùng Gorilla XOR. Không phần nào cần một lượt compaction. Nó xảy ra ngay khi sample đến, vì chúng đến theo thứ tự thời gian.
 
-- **PostgreSQL JSONB** lưu toàn bộ tài liệu nhãn trên *mỗi dòng*. Dù `env="production"` lặp lại hàng triệu lần, PostgreSQL không có string interning cấp hệ thống. Chỉ mục GIN báo cho Postgres xem dòng nào khớp, nhưng mỗi khớp vẫn phải quay về heap để đọc giá trị → một match luôn đi kèm heap fetch.
-- **PostgreSQL Chuẩn hóa** ngược lại: hàng rẻ, chỉ mục đắt (tỉ lệ index/heap ~0.61), nhưng vẫn phải lưu văn bản nhãn ít nhất một lần mỗi dòng.
-- **Prometheus** lưu nhãn một lần duy nhất trong inverted index (postings list). Sample sau này chỉ là hai số: timestamp + giá trị.
+## Tại sao Prometheus nhỏ hơn và nhanh hơn
 
-Phép nén quan trọng nhất diễn ra ngay khi sample đầu tiên vào cỗ máy: **delta-of-delta** trên timestamps và **Gorilla XOR** trên giá trị. Khi tần suất scrape ổn định, khoảng cách giữa các mốc thời gian gần bằng không, nên timestamps tốn khoảng 1 bit mỗi. Một chunk 120 sample chỉ tốn khoảng 15 bytes cho timestamps — không phải vì compaction cải thiện nén, mà vì Prometheus ghi theo thứ tự thời gian ngay từ đầu.
+Prometheus đạt được điều đó bằng cách không làm bốn việc Postgres buộc phải làm:
 
-## Tốc độ ghi: thực tế, không phải wall-clock
+| Prometheus không làm | Tiết kiệm được gì |
+|--------------------|---------------|
+| UPDATE / DELETE tại chỗ | Ghi append-only và theo thứ tự thời gian |
+| Một row mỗi sample | Label set là identity, nên nhãn không bị lặp mỗi sample |
+| Index B-tree đa mục đích | Inverted index trên series ref, không phải row |
+| MVCC row versioning | Không tuple header 23 byte mỗi row, không WAL record mỗi row |
 
-| Hệ thống | Thời gian ghi thực | Tốc độ khi ghi |
-|----------|-------------------|----------------|
-| PostgreSQL JSONB | 1.4 s (COPY) | ~106k mẫu/s |
-| PostgreSQL Chuẩn hóa | 0.6 s (COPY) | ~254k mẫu/s |
-| Prometheus | 0.5 s ingest + 72 s pacing delay | ~284k mẫu/s khi ghi |
+Hai điểm cuối giải thích phần lớn khoảng cách bytes/sample.
 
-Cảnh báo quan trọng: thời gian wall của Prometheus chứa ~72 giây **pacing delay** (`REQUEST_DELAY`) để tránh quá tải WAL. Bỏ pacing thì Prometheus mất khoảng 30% mẫu. Đây là *chắn chống áp lực ngược*, không phải nút điều chỉnh — so sánh wall-clock trực tiếp là không công bằng. Điều quan trọng là throughput thực khi ghi sau khi tính pacing, và ở đó Prometheus giữ vững được.
+## Ghi
 
-Lưu ý: 72 giây này là của **Prometheus remote-write**, không phải PostgreSQL COPY. Postgres chạy COPY unpaced, nên con số trên bảng là thật cho mỗi hệ thống.
+| Hệ thống | Thời gian ghi | Throughput khi ghi |
+|--------|-----------|--------------------------|
+| PostgreSQL JSONB | 2.7 s (COPY) | ~106k sample/s |
+| PostgreSQL chuẩn hóa | 0.9 s (COPY) | ~311k sample/s |
+| Prometheus | 0.7 s | ~421k sample/s |
 
-## Truy vấn tải: ai gãy trước?
+Wall-clock của Prometheus dài hơn nhiều, khoảng 144 s. Đó là `REQUEST_DELAY` tôi tự đặt, một lần dừng sau mỗi batch remote-write để WAL không bị dội. Nó không nói gì về tốc độ của Prometheus, nên hãy so thời gian ghi ở bảng trên và bỏ qua wall-clock. Postgres không có khoảng dừng đó.
 
-Tôi dùng k6 để ramp tốc độ truy vấn từ 10 lên 2,000 requests/giây (`ramping-arrival-rate`, mô hình mở), với ngưỡng p95 500 ms. Tất cả ba hệ thống đều đến điểm phá vỡ (k6 exit code 99).
+## Năm truy vấn
 
-**Quan trọng: k6 chỉ thử đúng một hình dạng truy vấn — q1 counter rate:**
+Các nhãn q1–q5 chỉ là tên gọi. Đây là chính xác mỗi cái chạy gì; mỗi hình dạng tồn tại để kiểm tra một claim khác nhau.
+
+| Query | Đo cái gì | PromQL | SQL Postgres (schema chuẩn hóa) |
+|-------|--------------------|--------|----------------------------------|
+| q1 | Rate trên mọi series counter | `sum(rate(http_requests_total[5m]))` | `lag(value) OVER (PARTITION BY series_id ORDER BY time)`, rồi cộng các delta |
+| q2 | Queue depth nhóm theo job | `sum by (job) (queue_depth)` | `GROUP BY job` với `avg(value)` |
+| q3 | p90 mỗi instance của `job-00`, một giờ | `quantile_over_time(0.9, queue_depth{job="job-00"}[1h])` | `percentile_cont(0.9) WITHIN GROUP (ORDER BY value)`, nhóm theo instance |
+| q4 | Queue depth trung bình của `job-00`, toàn cửa sổ | `sum(queue_depth{job="job-00"})` | `avg(value)` với `job = 'job-00'` |
+| q5 | Một instance, 15 phút cuối | `queue_depth{instance="host-0000"}` | `avg(value)` với `instance = 'host-0000'` |
+
+Schema JSONB chạy cùng câu SQL nhưng trên một document `labels` (`labels->>'job'`, `labels @> '{"__name__":...}'`) thay vì join `series_dim`.
+
+Bảng này cũng cho thấy một điểm không đối xứng. Prometheus chạy mỗi PromQL như một instant query ở cuối cửa sổ; Postgres gộp trên cả cửa sổ. Với q1, Prometheus đọc 5 phút cuối còn Postgres đi hết 45 phút. Nên đây là so chi phí của hình dạng trên mỗi engine, không phải so hai bên quét cùng số row. Chỗ nào điều đó làm thay đổi cách đọc, tôi nói rõ.
+
+## Độ trễ truy vấn
+
+Một kết nối, cache warm, 30 lượt đo sau 3 lượt warm-up, truyền `time=` tường minh ở cuối cửa sổ dữ liệu. Mọi truy vấn đều trả về row. Harness ghi số row khớp mỗi truy vấn và từ chối báo latency cho kết quả rỗng, vì kết quả rỗng sẽ trông như truy vấn nhanh nhất có thể.
+
+| Query | Hình dạng | Prometheus p50 / p95 | Postgres JSONB p50 / p95 | Postgres chuẩn hóa + BRIN p50 / p95 |
+|-------|-------|----------------------|--------------------------|--------------------------------------|
+| q1 | Rate trên mọi counter | 3.0 / 4.5 ms | 874.3 / 910.8 ms | 63.9 / 65.1 ms |
+| q2 | Sum theo job | 2.6 / 4.0 ms | 71.0 / 77.8 ms | 31.1 / 32.6 ms |
+| q3 | p90 mỗi instance, 1 h | 9.5 / 18.7 ms | 45.5 / 86.2 ms | 12.2 / 12.4 ms |
+| q4 | Một job, toàn cửa sổ | 1.6 / 1.7 ms | 21.8 / 22.0 ms | 7.1 / 7.3 ms |
+| q5 | Một instance, 15 phút | 0.52 / 0.58 ms | 0.23 / 0.38 ms | 0.14 / 0.32 ms |
+
+<svg role="img" aria-labelledby="chart-q-title chart-q-desc" viewBox="0 0 640 270" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
+  <title id="chart-q-title">Độ trễ truy vấn theo hình dạng — p50, milliseconds (thang log)</title>
+  <desc id="chart-q-desc">Cột nhóm so sánh p50 cho năm hình dạng truy vấn giữa Prometheus, PostgreSQL JSONB và PostgreSQL chuẩn hóa. Prometheus thắng q1 đến q4; Postgres chuẩn hóa thắng q5.</desc>
+  <text x="16" y="20" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">p50 ms (thang log)</text>
+  <g font-family="system-ui, sans-serif" font-size="11" fill="#374151">
+    <text x="16" y="70">q1</text><text x="16" y="115">q2</text><text x="16" y="160">q3</text><text x="16" y="205">q4</text><text x="16" y="250">q5</text>
+  </g>
+  <g>
+    <rect x="50" y="52" width="12" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="70" width="110" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="88" width="89" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="97" width="21" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="115" width="83" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="133" width="70" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="142" width="38" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="160" width="77" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="178" width="50" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="187" width="21" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="205" width="61" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="223" width="40" height="16" fill="#3b82f6" rx="2"/>
+  </g>
+  <g font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">
+    <rect x="420" y="52" width="10" height="10" fill="#10b981" rx="1"/><text x="436" y="61">Prometheus</text>
+    <rect x="420" y="70" width="10" height="10" fill="#ef4444" rx="1"/><text x="436" y="79">Postgres JSONB</text>
+    <rect x="420" y="88" width="10" height="10" fill="#3b82f6" rx="1"/><text x="436" y="97">Postgres chuẩn hóa + BRIN</text>
+  </g>
+</svg>
+
+Prometheus thắng q1 đến q4, Postgres chuẩn hóa thắng q5. Ba điểm trong bảng đáng nhìn kỹ.
+
+q1 là hình dạng counter-reset. Trong Postgres bạn viết `lag() OVER (PARTITION BY ...)`, nó phải sắp xếp và đi qua từng row. JSONB còn trả heap fetch mỗi row, đó là nguồn gốc của 874 ms. Chuẩn hóa và join một bảng dimension nhỏ kéo xuống 64 ms. Prometheus đọc một slice đã được sắp xếp từ lúc ghi, và mất 3 ms. Cửa sổ ở đây khác nhau như đã nói: Prometheus trả lời rate 5 phút, Postgres đi cả cửa sổ 45 phút, nên một phần khoảng cách là khối lượng chứ không phải thuật toán. Dù vậy, window function cộng heap fetch vẫn là phần lớn thiệt hại.
+
+q3 làm tôi bất ngờ. Tôi tưởng percentile là sân nhà của Postgres: `percentile_cont` sắp xếp trong database và không có giới hạn sample, còn `quantile_over_time` sắp xếp trong RAM dưới `--query.max-samples`. Với 400 series và 45 phút, Prometheus vẫn thắng (9.5 ms so với 12.2 ms). Tôi nghĩ điều đó sẽ đổi khi N lớn hơn nhiều, nên tôi không kết luận gì từ đây.
+
+q5 là chiến thắng rõ ràng của Postgres. Postgres lấy trung bình 60 row của một series, một tra cứu B-tree, và 0.14 ms là rất khó đánh bại. Prometheus trả lời selector tại một thời điểm, nên nó đọc một sample thay vì một khoảng. Nếu ai nói Prometheus thắng mọi hình dạng, hãy xem bảng của họ.
+
+## Load test
+
+Tôi dùng k6 để ramp từ 10 lên 2,000 request/giây (mô hình mở, `ramping-arrival-rate`) với ngưỡng p95 500 ms. Cả ba đều vượt ngưỡng (exit code 99), nên đây là đầu dò bão hòa và tôi không đọc nó như phép đo latency. Nó chỉ chạy một hình dạng, q1:
 
 ```
 sum(rate(http_requests_total[5m]))
 ```
 
-Đây là PromQL cho "counter rate trên tất cả chuỗi counter." PostgreSQL trả lời hình dạng tương tự với `lag() OVER (PARTITION BY ...)` qua cửa sổ thời gian. Dưới đây là mỗi hệ thống làm gì ngay trước khi gãy:
+Bên Postgres, tương đương là câu `lag() OVER (PARTITION BY ...)`.
 
-| Hệ thống | Iterations khi gãy | p50 latency | p95 latency | Iterations bị từ chối |
-|----------|-------------------|-------------|-------------|----------------------|
-| PostgreSQL JSONB | 278 | 66 s | 81 s | 469,522 |
-| PostgreSQL Chuẩn hóa | 469,604 | 0.5 ms | 0.7 ms | 196 |
-| Prometheus | 176,266 | 1.4 s | 3.1 s | 293,533 |
+| Hệ thống | Hoàn thành | Bị từ chối | p50 | p95 |
+|--------|-----------|---------|-----|-----|
+| Prometheus | 169,841 | 299,958 | 1.6 s | 1.8 s |
+| PostgreSQL chuẩn hóa | 4,894 | 464,906 | 3.6 s | 5.1 s |
+| PostgreSQL JSONB | 443 | 469,356 | 41.4 s | 52.5 s |
 
 <svg role="img" aria-labelledby="chart-break-title chart-break-desc" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
-  <title id="chart-break-title">Điểm phá vỡ — iterations đạt trước khi p95 > 500 ms</title>
-  <desc id="chart-break-desc">Biểu đồ cột ngang: PostgreSQL chuẩn hóa 469,604 iterations, Prometheus 176,266 iterations, PostgreSQL JSONB 278 iterations.</desc>
-  <rect x="80" y="30" width="64" height="42" fill="#3b82f6" rx="2"/>
-  <rect x="80" y="90" width="24" height="42" fill="#10b981" rx="2"/>
+  <title id="chart-break-title">Số iteration hoàn thành trên toàn bộ ramp</title>
+  <desc id="chart-break-desc">Biểu đồ cột ngang số iteration hoàn thành: Prometheus 169,841, PostgreSQL chuẩn hóa 4,894, PostgreSQL JSONB 443.</desc>
+  <rect x="80" y="30" width="64" height="42" fill="#10b981" rx="2"/>
+  <rect x="80" y="90" width="2" height="42" fill="#3b82f6" rx="2"/>
   <rect x="80" y="150" width="1" height="42" fill="#ef4444" rx="2"/>
-  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres chuẩn hóa</text>
-  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Prometheus</text>
+  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Prometheus</text>
+  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres chuẩn hóa</text>
   <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres JSONB</text>
-  <text x="95" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">469,604</text>
-  <text x="95" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">176,266</text>
-  <text x="95" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">278</text>
+  <text x="148" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">169,841</text>
+  <text x="86" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">4,894</text>
+  <text x="86" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">443</text>
 </svg>
 
-**Kết quả chính:** Ở hình dạng truy vấn này (tính `rate()` qua chuỗi counter, nhóm theo `job`), PostgreSQL Chuẩn hóa thắng cả độ trễ lẫn throughput. Prometheus từ chối gần 293k iterations vì mỗi truy vấn mất khoảng 1–3 giây — nó không kịp ở 2,000 req/s. JSONB gãy gần như ngay lập tức vì mỗi truy vấn mất khoảng 80 giây (JSONB containment + heap fetch cho mọi dòng).
+Mỗi row cộng lại khoảng 469,800, đúng bằng toàn bộ ramp. Nên "hoàn thành" đếm cả run, không phải thời điểm p95 vượt 500 ms. Trên cùng một ramp, Prometheus phục vụ khoảng 35× số truy vấn so với Postgres chuẩn hóa và 383× so với JSONB.
 
-Lưu ý thêm: độ trễ p95 của Prometheus chênh lệch giữa các lần chạy (~1.9–3.1s). Độ trễ tại điểm phá vỡ không ổn định bằng giá trị trung bình — coi nó là một khoảng.
+Con số 1.6 s của Prometheus là p50 khi có hàng trăm client cùng lúc. Cùng truy vấn đó mất 3 ms trên một kết nối, phần còn lại là queueing. Bảng latency cho biết một truy vấn tốn bao nhiêu; bảng này cho biết hệ thống chịu được bao nhiêu tải trước khi tail sụp.
 
-## Năm kịch bản truy vấn — đã đo vs đã định nghĩa
+## Tôi đã đo gì, và đo thế nào
 
-Benchmark định nghĩa **năm hình dạng truy vấn** trong `benchctl/shared/queries.py`, mỗi cái có phiên bản PromQL và SQL tương đương cho cả hai schema PostgreSQL. Chỉ **q1** được thực thi qua k6 load test trong run `gh-219.1`. Phase query-sweep (đã thêm vào `benchctl/driver/run.py`) giờ đo độ trễ theo từng truy vấn cho tất cả năm hình dạng; kết quả từ phase đó sẽ báo cáo trong run sau.
+Năm con số, mỗi con số có một quy tắc rõ ràng:
 
-| # | Kịch bản | PromQL | SQL tương đương | Đã đo trong gh-219.1 |
-|---|----------|--------|-----------------|----------------------|
-| q1 | Counter rate trên mọi chuỗi counter | `sum(rate(http_requests_total[5m]))` | `lag() OVER (PARTITION BY ...)` qua cửa sổ 5m | **Có** — k6 breaking point |
-| q2 | Aggregation nhóm theo job | `sum by (job) (queue_depth)` | `GROUP BY job` với `avg(value)` | Không — đã định nghĩa, chưa đo |
-| q3 | Per-series p90 qua 1 giờ | `quantile_over_time(0.9, queue_depth{job="job-00"}[1h])` | `percentile_cont(0.9) WITHIN GROUP` | Không — đã định nghĩa, chưa đo |
-| q4 | Selective wide: một job qua toàn window | `sum(queue_depth{job="job-00"})` | `WHERE s.job = 'job-00'` + `avg(value)` | Không — đã định nghĩa, chưa đo |
-| q5 | Short range: một chuỗi duy nhất, 15 phút | `queue_depth{instance="host-0000"}` | `WHERE s.instance = 'host-0000'` + `avg(value)` | Không — đã định nghĩa, chưa đo |
+| Chỉ số | Cách đo | Trả lời câu gì |
+|--------|---------------------|-----------------|
+| Đĩa | Bytes trên đĩa sau khi nạp 288,000 sample, chia cho số sample giữ lại. Gồm WAL của Prometheus và index của Postgres. | Giữ một sample tốn bao nhiêu? |
+| Độ trễ truy vấn | p50/p95 qua 30 lượt sau 3 lượt warm-up, một kết nối, cache warm, `time=` tường minh ở cuối cửa sổ. Kết quả rỗng bị loại. | Hình dạng truy vấn này tốn bao nhiêu? |
+| Ghi | Wall time của COPY (Postgres) và remote-write (Prometheus), với 144 s pacing của Prometheus bị loại khỏi throughput. | Đường ghi nhận dữ liệu nhanh đến đâu? |
+| Bão hòa | k6 ramp mô hình mở từ 10 lên 2,000 req/s, ngưỡng p95 500 ms, đếm iteration hoàn thành trên toàn ramp. | Chịu được bao nhiêu tải trước khi tail sụp? |
+| Parity | Số sample mỗi backend, trong ngưỡng 2%. | Ba store có giữ cùng dữ liệu không? |
 
-**Kỳ vọng winner** (từ mục đích kiến trúc, không phải đo trong gh-219.1): q1 → Prometheus; q2 → ngang nhau; q3 → PostgreSQL; q4 → Prometheus; q5 → PostgreSQL. Đây là giả định để xác thực qua query-sweep phase, không phải claim từ run này.
+Điều giữ phép so sánh công bằng: một dataset có seed, cùng giới hạn 1.5 CPU / 4 GB cho mọi container, và một biểu thức cố định cho mỗi backend ở cả năm hình dạng. Chỗ nào hai engine không làm cùng một khối lượng việc, phần caveat ở cuối nói rõ.
 
-## PostgreSQL thắng gì — và tôi đã sai chỗ nào
+## Nơi Postgres là lựa chọn tốt hơn
 
-Nếu bài viết chỉ nói "PostgreSQL chậm", thì nó sai. Kiến trúc cho thấy PostgreSQL thực sự vượt trội ở ba điểm:
+- Tra cứu một series, khoảng ngắn. q5 cho thấy: 0.14 ms so với 0.52 ms.
+- Percentile không giới hạn sample. `percentile_cont` không bị ràng buộc bởi `--query.max-samples` (mặc định 50M), và khi N rất lớn điều đó quan trọng.
+- Join. PromQL không join được metrics với khách hàng hay giao dịch, còn SQL thì được.
+- Retention. Drop một partition là O(1). Prometheus ghi tombstone và viết lại block ở lần compaction kế tiếp.
 
-1. **Percentiles qua khoảng thời gian.** `percentile_cont(0.9) WITHIN GROUP (ORDER BY value)` sắp xếp trong cơ sở dữ liệu, không bị trần cấp `--query.max-samples` của Prometheus (mặc định 50M). `quantile_over_time` của Prometheus sắp xếp trong RAM và bị trần cấp.
-2. **Tra cứu điểm một chuỗi duy nhất.** Lấy một chuỗi tại một mốc thời gian là dưới 1 ms trong PostgreSQL nhờ B-tree / BRIN point lookup.
-3. **SQL phức tạp và joins.** PromQL là ngôn ngữ kín. PostgreSQL cho phép bạn join metrics trực tiếp với dữ liệu nghiệp vụ (khách hàng, giao dịch) trong cùng một câu truy vấn.
+## Những gì bài này chưa cho thấy
 
-## Honesty caveats — câu trả lời tôi muốn anh ấy nghe nhất
+1. Tổng của hai engine chênh khoảng 3× (149.1M so với 452.1M) vì chúng định nghĩa "giá trị cuối" khác nhau. Chỉ số sample count là check thật.
+2. Prometheus mất 0.56% sample. Tôi chưa truy ra vì sao.
+3. Không có gì được compact. 45 phút nằm dưới head span khoảng 3 h, nên con số đĩa là cho head chunk và block steady-state có thể khác.
+4. Không có số CPU hay RAM. Runner CI không đọc được container metrics. Chúng về Grafana Cloud nhưng không có trong bài này.
+5. Query sweep là một kết nối và warm. Nó chỉ đo chi phí truy vấn. Run k6 là góc nhìn concurrency.
+6. Scale nhỏ, 1,600 series và 288,000 sample. Nó cho thấy hình dạng chi phí và nói rất ít về cách chúng tăng. q3 đặc biệt có thể đảo.
+7. Tôi dùng `prom/prometheus:latest` và `postgres:latest` và không ghi lại digest của image.
+8. Con số ~1.37 B/sample của Gorilla và claim nén 90-95% của TimescaleDB là từ paper và tài liệu, không phải từ lần chạy của tôi.
+9. Hai engine không phải lúc nào cũng quét cùng một cửa sổ. Prometheus trả lời instant query ở cuối cửa sổ; Postgres gộp trên cả cửa sổ. q1 là ví dụ rõ nhất, rate 5 phút so với đi bộ 45 phút. Bảng so chi phí của hình dạng trên mỗi engine, không phải cùng một khối lượng việc.
 
-1. **Sum parity không được xác thực.** Tổng Prometheus (154M) vs PostgreSQL (452M) chênh khoảng 3×. Tôi cố tình không claim sum parity; số lượng *mẫu* khớp trong 0.6% (−800 trong 144,000). Khoảng cách tổng chưa được giải thích và ghi làm chẩn đoán.
-2. **Prometheus mất 0.6% mẫu** (143,200 vs 144,000). Đã ghi lại, không giấu.
-3. **Chưa compact.** Cửa sổ 45 phút dưới ngưỡng compact của Prometheus (~3 h head span), nên con số đĩa phản ánh head chunks, không phải steady-state on-disk blocks.
-4. **CPU/RAM không có trong báo cáo.** Môi trường CI không thể hiển thị chỉ số cAdvisor container cho runner; chỉ số này gửi lên Grafana Cloud nhưng không công bố trong bài.
-5. **Chỉ q1 được đo dưới tải.** Kế legs k6 chỉ thử `sum(rate(http_requests_total[5m]))`. q2–q5 đã được định nghĩa trong query catalog với PromQL + SQL tương đương, và query-sweep phase có thể đo chúng trong run sau.
-6. **Một số con số là literature, không phải đo.** Con số ~1.37 B/sample của Gorilla và claim nén 90–95% của TimescaleDB đến từ papers và documentation, không phải từ benchmark này.
+## Tôi sẽ nói gì bây giờ
 
-## Câu trả lời tôi muốn đưa anh ấy
+Nếu anh ấy hỏi lại, tôi sẽ không nói "Postgres không làm được", vì nó làm được. Tôi sẽ nói nó làm được, đây là cái giá, và đây là nơi nó thắng:
 
-Nếu gặp lại Head of Platform, tôi sẽ không nói "PostgreSQL cũng làm được". Tôi sẽ nói:
+> PostgreSQL lưu được metrics, nhưng mỗi sample phải trả cho tuple header, index entry, WAL, và một heap fetch mỗi khi bạn lọc theo label. Trong test của tôi, cái giá đó là 30× đến 69× dung lượng đĩa và nhanh nhất là chậm hơn khoảng 290× ở truy vấn counter-rate, dù một phần khoảng cách cuối là do Postgres phải quét cửa sổ rộng hơn. Prometheus bỏ hết những thứ đó: không UPDATE, không row mỗi sample, và decompression gần như miễn phí. Đổi lại nó cứng nhắc. Nếu bạn cần join, percentile không giới hạn sample, hoặc nhiều năm retention cạnh dữ liệu nghiệp vụ, Postgres là lựa chọn hợp lý và đôi khi là lựa chọn tốt hơn.
 
-> *"PostgreSQL có thể lưu metrics, nhưng bạn phải trả giá: tuple header, index bloat, WAL cho từng sample, và heap fetch mỗi khi bạn hỏi 'giá trị của nhãn này là gì'. Prometheus từ chối những chi phí đó — không UPDATE tại chỗ, không DELETE chọn lọc, không one-row-per-sample. Đổi lấy nó nhận được cấu trúc chỉ đọc, tuần tự, nén tốt, decompression gần như miễn phí. Giá trả là sự cứng nhắc vận hành."*
+Nên câu trả lời phụ thuộc workload, và bảng dưới đây là cách tôi sẽ quyết định.
 
-| Tình huống | Chọn |
-|------------|------|
-| Giám sát hạ tầng, Kubernetes, cảnh báo tức thời | **Prometheus** |
-| Dữ liệu time-series nhiều năm, JOIN với dữ liệu nghiệp vụ | **PostgreSQL + TimescaleDB** (hoặc hybrid) |
-| Percentile SQL không ceiling, ad-hoc reporting | **PostgreSQL** |
-| High cardinality, long retention, chi phí đĩa quan trọng | **Prometheus** |
+| Tình huống | Dùng |
+|-----------|-----|
+| Giám sát hạ tầng, Kubernetes, cảnh báo tức thời | Prometheus |
+| Nhiều năm retention, metrics join với dữ liệu nghiệp vụ | PostgreSQL + TimescaleDB, hoặc hybrid |
+| Percentile SQL không giới hạn, ad-hoc reporting | PostgreSQL |
+| High cardinality và chi phí đĩa quan trọng | Prometheus |
+
+## Dự đoán ban đầu có đúng không?
+
+Trong buổi phỏng vấn tôi đưa ra hai nhận định không có số liệu. Đây là kết quả đối chiếu.
+
+| Tôi đã nói | Đo được gì | Kết luận |
+|-------------|-----------------|---------|
+| Postgres sẽ tốn nhiều đĩa hơn, chủ yếu vì index. | Nhiều hơn 30× mỗi sample so với Prometheus ở schema chuẩn hóa, 69× với JSONB. Nhưng hai schema Postgres giữ cùng số row mà vẫn chênh 2.3× (838 so với 371 B/sample), và khoảng chênh đó là label document bị lặp trên từng row. | Đúng ở chỗ đĩa là vấn đề; sai ở chỗ index là nguyên nhân chính. |
+| `rate()` sẽ chậm hơn trên Postgres. | q1: 3.0 ms trên Prometheus, 63.9 ms chuẩn hóa, 874.3 ms JSONB. | Đúng hướng. Độ lớn phụ thuộc schema và cửa sổ: một phần khoảng cách là Postgres quét 45 phút còn Prometheus quét 5 phút. |
+| Tôi không nghĩ Postgres sẽ thắng hình dạng nào. | q5: 0.14 ms chuẩn hóa so với 0.52 ms Prometheus. | Sai. Tra cứu ngắn, một series là điểm mạnh của Postgres. |
+
+Cả hai nhận định đều đúng hướng, nên câu hỏi tiếp theo "tại sao?" mới là phép thử thật. Nhưng cơ chế tôi đưa ra quá đơn giản. Tôi đổ cho B-tree. Số đo chỉ vào identity: JSONB lưu cả label document trên từng row, và khoảng chênh 2.3× giữa hai schema Postgres — cùng row, khác cách xếp — chính là sự lặp đó. Schema chuẩn hóa tránh được nó nhưng vẫn giữ một index entry mỗi sample. Prometheus ghi label set một lần, sau đó chỉ còn timestamp và value.
+
+Vậy câu trả lời phỏng vấn đúng một nửa. Chi phí là thật, nhưng phần lớn là chi phí lặp lại identity chứ không phải index, và khoảng cách tốc độ phụ thuộc hình dạng truy vấn chứ không phổ quát. Đó cũng là lý do kết luận là một bảng quyết định, không phải một người thắng.
 
 ## Reproduce
 
-Toàn bộ benchmark chạy tự động trên GitHub Actions tại `github.com/hungpham10/my-benchmarks` (thư mục `benchctl/`). Số trong bài là output của run `gh-219.1` trên nhánh `main`. Bạn có thể chạy `scale=smoke` (~3 phút) để tự thấy parity check, rồi `scale=pg` (~31 phút) để đi sâu. Phase query-sweep (độ trễ theo từng truy vấn q1–q5) là một phần của pipeline `scale=pg`.
+Mọi thứ chạy trên GitHub Actions tại `github.com/hungpham10/my-benchmarks`, trong `benchctl/`. Số đến từ run `gh-232.1` trên `main`, mất khoảng 33 phút. `scale=smoke` mất khoảng 3 phút và chỉ cho thấy pipeline hoạt động. `scale=pg` là so sánh đầy đủ và bao gồm sweep q1 đến q5.
 
----
-
-*Tất cả số liệu từ một lần chạy GitHub Actions duy nhất (scale=pg, run `gh-219.1`), Prometheus 3.15.0 vs PostgreSQL 18.6, mỗi hệ giới hạn 1.5 CPU / 4 GB. Tên công ty và Head of Platform đã được giấu tên theo yêu cầu.*
+*Số đo từ một run `scale=pg`, dùng `prom/prometheus:latest` và `postgres:latest`, mỗi hệ giới hạn 1.5 CPU / 4 GB. Tên công ty và Head of Platform không được nêu, theo yêu cầu.*
