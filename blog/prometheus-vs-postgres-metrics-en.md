@@ -1,17 +1,17 @@
 ---
-title: "Prometheus vs PostgreSQL as a Metrics Store: An Interview Question, Benchmarked"
-date: 2026-10-18
-lastmod: 2026-10-18
+title: "Why can't we just use PostgreSQL for metrics? I benchmarked it"
+date: 2026-10-19
+lastmod: 2026-10-19
 tags: [prometheus, postgresql, benchmark, metrics, time-series]
-excerpt: "A head of platform once asked why Prometheus or InfluxDB is better than PostgreSQL for metrics. I answered that PostgreSQL can do it too. That was the trap. I benchmarked all three on identical data. Here are the measured numbers."
+excerpt: "In an interview, the Head of Platform asked me why PostgreSQL can't be used for metrics. I gave the textbook answer and had no numbers to back it. So I ran the benchmark."
 ---
 
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  "headline": "Prometheus vs PostgreSQL as a Metrics Store: An Interview Question, Benchmarked",
-  "description": "A head of platform once asked why Prometheus or InfluxDB is better than PostgreSQL for metrics. I benchmarked all three on identical data. Here are the measured numbers.",
+  "headline": "Why can't we just use PostgreSQL for metrics? I benchmarked it",
+  "description": "In an interview, the Head of Platform asked me why PostgreSQL can't be used for metrics. I gave the textbook answer and had no numbers to back it. So I ran the benchmark.",
   "author": {
     "@type": "Person",
     "name": "Platform Engineering Team"
@@ -20,8 +20,8 @@ excerpt: "A head of platform once asked why Prometheus or InfluxDB is better tha
     "@type": "Organization",
     "name": "Platform Engineering Blog"
   },
-  "datePublished": "2026-10-18",
-  "dateModified": "2026-10-18",
+  "datePublished": "2026-10-19",
+  "dateModified": "2026-10-19",
   "mainEntityOfPage": {
     "@type": "WebPage",
     "@id": "https://example.com/blog/prometheus-vs-postgres-metrics"
@@ -31,180 +31,166 @@ excerpt: "A head of platform once asked why Prometheus or InfluxDB is better tha
 }
 </script>
 
-<meta property="og:title" content="Prometheus vs PostgreSQL as a Metrics Store: An Interview Question, Benchmarked">
-<meta property="og:description" content="A head of platform once asked why Prometheus or InfluxDB is better than PostgreSQL for metrics. I benchmarked all three on identical data. Here are the measured numbers.">
+<meta property="og:title" content="Why can't we just use PostgreSQL for metrics? I benchmarked it">
+<meta property="og:description" content="In an interview, the Head of Platform asked me why PostgreSQL can't be used for metrics. I gave the textbook answer and had no numbers to back it. So I ran the benchmark.">
 <meta property="og:type" content="article">
-<meta property="og:article:published_time" content="2026-10-18">
+<meta property="og:article:published_time" content="2026-10-19">
 <meta property="twitter:card" content="summary">
 
-# Prometheus vs PostgreSQL: An Interview Question, Benchmarked
+# Why can't we just use PostgreSQL for metrics? I benchmarked it
 
-## The question I answered wrong
+The interview was for a Platform Engineering role. The Head of Platform skipped the usual questions and asked:
 
-During a Platform Engineering interview at a consumer bank (name withheld), the Head of Platform asked me a question that sounded simple:
+> "Why can't we just use PostgreSQL for metrics?"
 
-> "Why use Prometheus or InfluxDB for metrics instead of PostgreSQL?"
+I said what I believed: metrics are append-mostly, a series is identified by its labels, and time-ordered data compresses better than rows. He wasn't convinced, and I can't blame him. I could say what I believed, not why. So I ran the benchmark.
 
-I fell into the trap. I answered that PostgreSQL can do it too — you can store metrics in a Postgres table and query with SQL.
+## The short version
 
-He nodded. Only afterward did I realize the real question: not "can PostgreSQL store metrics," but "do you know what you pay for that convenience?" I didn't have a good answer.
+- **Disk:** Prometheus 12.18 bytes/sample, PostgreSQL normalized 370.88, PostgreSQL JSONB 838.25. That is 30× and 69× smaller.
+- **One series, 30 days, 5-second scrape:** 6.3 MB on Prometheus, 192.3 MB on normalized Postgres, 434.5 MB on JSONB. At 10,000 series that is $4.70, $304 and $688 per month of GCP storage.
+- **Query latency:** Prometheus was fastest on four of five query shapes. Postgres won the fifth: a single series over 15 minutes.
+- **Counter rate across all series:** 3.0 ms on Prometheus, 63.9 ms on normalized Postgres, 874.3 ms on JSONB.
+- **Under load:** over the same ramp, Prometheus completed 169,841 queries, normalized Postgres 4,894, JSONB 443.
 
-After the interview, I benchmarked all three systems on identical data, identical query load, and identical hardware limits. This post is the answer I wish I had given — not opinion, but measured numbers.
+Either can be the right choice. It depends on the workload.
 
-## Key Takeaways
+## Setup
 
-- **Disk:** Prometheus **12.68 bytes/sample** vs PostgreSQL normalized **540.09 B/sample** vs PostgreSQL JSONB **1,024.56 B/sample**. Prometheus is 43× smaller than normalized Postgres and 81× smaller than JSONB.
-- **Ingest:** Prometheus spends 0.5 s actually writing plus ~72 s of pacing delay (a shield against WAL backpressure, not a tuning knob). PostgreSQL COPY: 0.6 s normalized / 1.4 s JSONB.
-- **Breaking point** (k6 load test, **one query shape only**: `sum(rate(http_requests_total[5m]))`, ramp 10→200→2000 req/s, p95 threshold 500 ms): PostgreSQL normalized completed 469,604 iterations at p50 0.5 ms; Prometheus completed 176,266 at p50 1.4 s; PostgreSQL JSONB completed only 278 at p50 66 s.
-- **Query scenarios defined:** five shapes (q1–q5) are specified in `benchctl/shared/queries.py` with PromQL and SQL equivalents; q1 was measured via k6, q2–q5 are now measurable with the new query-sweep phase.
-- **Parity:** sample counts match within 0.6% (−800 of 144,000, inside the 2% tolerance). Sums differ by ~3× and are recorded as diagnostic only.
-- **Caveat:** Prometheus was not yet compacted (45-minute window is below the ~3 h head threshold), CPU/RAM was not captured in CI.
+- **Data:** 1,600 series (2 jobs × 400 instances × 2 metric families), 180 samples each at 15 s intervals, 288,000 samples per backend. The generator is seeded, so every run is identical.
+- **Limits:** each store ran in a container capped at 1.5 CPU and 4 GB RAM.
+- **Postgres schemas:** "use Postgres for metrics" can mean very different table designs, so I tested two.
+  - **JSONB:** one row per sample, the whole label set in a `jsonb` column with a GIN index. This is what most teams write first.
+  - **Normalized:** labels in a small `series_dim` table, samples stored as `(series_id, time, value)`, BRIN on time and a btree on `(series_id, time)`. This is roughly the best Postgres can do here.
 
-## What Prometheus actually did: four "refusals"
+## The Postgres schemas
 
-Prometheus does not win because it has a better compression algorithm. It wins because it **refuses what PostgreSQL does**. Each refusal is an architectural decision with measurable cost:
+Here is what the two look like. If both lose, the result is about Postgres; if only one loses, it is about the schema.
 
-| # | Prometheus refuses | Architectural consequence |
-|---|-------------------|--------------------------|
-| 1 | In-place `UPDATE` / `DELETE` | Append-only, time-ordered writes only |
-| 2 | One row per sample | The label set *is* the identity; no per-row label repetition |
-| 3 | General-purpose B-tree indexes | Inverted postings index (series refs, not rows) |
-| 4 | MVCC visibility columns | No 23–24 byte tuple header per row, no per-sample WAL |
+```sql
+-- Schema 1: labels as a document. The layout most teams write first.
+CREATE TABLE metrics_jsonb (
+    time    timestamptz      NOT NULL,
+    labels  jsonb            NOT NULL,
+    value   double precision NOT NULL
+) PARTITION BY RANGE (time);
 
-The last two account for most of the bytes-per-sample gap below.
+CREATE INDEX metrics_jsonb_labels_idx ON metrics_jsonb USING gin (labels jsonb_path_ops);
+CREATE INDEX metrics_jsonb_time_idx   ON metrics_jsonb (time);
 
-## Same data, same load
+-- Schema 2: identity in its own table, BRIN on time.
+CREATE TABLE series_dim (
+    id       int  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    metric   text NOT NULL,
+    job      text NOT NULL,
+    instance text NOT NULL,
+    region   text NOT NULL,
+    service  text NOT NULL,
+    UNIQUE (metric, job, instance)
+);
 
-All three systems received the same synthetic dataset (~20k series, 15 s scrape interval, 45-minute window). Each system ran under the same constraint: **1.5 CPU / 4 GB RAM**. Every run verifies sample parity within 2% (`failed: 0`). Sums are diagnostic only — they are not part of the verified claim.
+CREATE TABLE metrics_norm_brin (
+    time      timestamptz      NOT NULL,
+    series_id int              NOT NULL,
+    value     double precision NOT NULL
+) PARTITION BY RANGE (time);
 
-## Disk footprint (chart and table)
-
-| System | Samples kept | Bytes on disk | **Bytes / sample** |
-|--------|--------------|---------------|--------------------|
-| Prometheus TSDB | 143,200 | 1.7 MB | **12.68** |
-| PostgreSQL Normalized | 144,000 | 74.2 MB | **540.09** |
-| PostgreSQL JSONB | 144,000 | 140.7 MB | **1,024.56** |
-
-<svg role="img" aria-labelledby="chart-disk-title chart-disk-desc" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
-  <title id="chart-disk-title">Disk footprint — bytes per sample</title>
-  <desc id="chart-disk-desc">Horizontal bar chart comparing bytes per sample: Prometheus 12.68, PostgreSQL normalized 540.09, PostgreSQL JSONB 1,024.56.</desc>
-  <rect x="80" y="30" width="11" height="42" fill="#10b981" rx="2"/>
-  <rect x="80" y="90" width="33" height="42" fill="#3b82f6" rx="2"/>
-  <rect x="80" y="150" width="64" height="42" fill="#ef4444" rx="2"/>
-  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Prometheus</text>
-  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres normalized</text>
-  <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres JSONB</text>
-  <text x="93" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">12.68</text>
-  <text x="95" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">540.09</text>
-  <text x="95" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">1,024.56</text>
-</svg>
-
-### Why PostgreSQL uses more space
-
-The cost is not the index structure — it is the **label text**.
-
-- **PostgreSQL JSONB** stores the entire label document on *every row*. Even if `env="production"` repeats millions of times, PostgreSQL has no system-level string interning. A GIN index tells Postgres which rows match, but every match still requires a heap fetch to read the value.
-- **PostgreSQL Normalized** inverts this: cheap rows, expensive indexes (index-to-heap ratio ~0.61). But it still stores label text at least once per row.
-- **Prometheus** stores each label set once in its inverted index (postings list). Subsequent samples are just two numbers: timestamp and value.
-
-The most important compression happens when the first sample enters the engine: **delta-of-delta** on timestamps and **Gorilla XOR** on values. When scrape intervals are stable, successive timestamp deltas are nearly zero, so timestamps cost roughly 1 bit each. A 120-sample chunk spends about 15 bytes on timestamps — not because compaction improves compression, but because Prometheus writes in time order from the start.
-
-## Ingest speed: real work, not wall-clock
-
-| System | Actual write time | Throughput during write |
-|--------|------------------|------------------------|
-| PostgreSQL JSONB | 1.4 s (COPY) | ~106k samples/s |
-| PostgreSQL Normalized | 0.6 s (COPY) | ~254k samples/s |
-| Prometheus | 0.5 s ingest + 72 s pacing delay | ~284k samples/s during ingest |
-
-Important caveat: Prometheus wall time includes ~72 seconds of **pacing delay** (`REQUEST_DELAY`) to avoid overwhelming the WAL. Without pacing, Prometheus drops roughly 30% of samples. This is a backpressure shield, not a tuning knob — comparing wall-clock times directly is unfair. What matters is real write throughput once pacing is accounted for, and there Prometheus holds its own.
-
-Note: those 72 seconds are **Prometheus remote-write** pacing, not PostgreSQL COPY. Postgres runs COPY unpaced, so the numbers above are real for each system.
-
-## Query load test: who breaks first?
-
-I used k6 to ramp query rate from 10 to 2,000 requests per second (`ramping-arrival-rate`, open model), with a p95 threshold of 500 ms. All three systems hit the breaking point (k6 exit code 99).
-
-**Important: the k6 leg tested exactly one query shape — q1 counter rate:**
-
-```
-sum(rate(http_requests_total[5m]))
+CREATE INDEX metrics_norm_brin_time_brin_idx
+    ON metrics_norm_brin USING brin (time) WITH (pages_per_range = 32);
+CREATE INDEX metrics_norm_brin_series_time_idx
+    ON metrics_norm_brin (series_id, time);
 ```
 
-This is the PromQL for "counter rate across every counter series." PostgreSQL answers the same shape with `lag() OVER (PARTITION BY ...)` window functions over the time window. Here is what each system did right before it broke:
+Both parents are partitioned by day on `time`. The loader creates the partitions at run time, because the dataset is timestamped in the future and `initdb` only sees an empty `PGDATA`.
 
-| System | Iterations at break | p50 latency | p95 latency | Iterations dropped |
-|--------|---------------------|-------------|-------------|--------------------|
-| PostgreSQL JSONB | 278 | 66 s | 81 s | 469,522 |
-| PostgreSQL Normalized | 469,604 | 0.5 ms | 0.7 ms | 196 |
-| Prometheus | 176,266 | 1.4 s | 3.1 s | 293,533 |
+The first schema is the one most teams reach for: a row per sample, the whole series identity in a JSON document, GIN for containment. It is also the one that stores `env="production"` again on every row.
 
-<svg role="img" aria-labelledby="chart-break-title chart-break-desc" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
-  <title id="chart-break-title">Breaking point — iterations achieved before p95 exceeds 500 ms</title>
-  <desc id="chart-break-desc">Horizontal bar chart: PostgreSQL normalized 469,604 iterations, Prometheus 176,266 iterations, PostgreSQL JSONB 278 iterations.</desc>
-  <rect x="80" y="30" width="64" height="42" fill="#3b82f6" rx="2"/>
-  <rect x="80" y="90" width="24" height="42" fill="#10b981" rx="2"/>
-  <rect x="80" y="150" width="1" height="42" fill="#ef4444" rx="2"/>
-  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres normalized</text>
-  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Prometheus</text>
-  <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#374151">Postgres JSONB</text>
-  <text x="95" y="59" font-family="system-ui, sans-serif" font-size="12" fill="#374151">469,604</text>
-  <text x="95" y="119" font-family="system-ui, sans-serif" font-size="12" fill="#374151">176,266</text>
-  <text x="95" y="179" font-family="system-ui, sans-serif" font-size="12" fill="#374151">278</text>
-</svg>
+The second is the best Postgres can do for this access pattern: a 4-byte `series_id` instead of the label text, BRIN on time because samples are append-only and roughly time-ordered, and a btree on `(series_id, time)` for the per-series lookups. BRIN is the Postgres-native answer to append-only data: it stores min/max per page range and costs kilobytes rather than megabytes. Whether it helps here is one of the things the run measures.
 
-**Main finding:** At this query shape (calculating `rate()` over counter series, grouped by `job`), normalized PostgreSQL wins on both latency and throughput. Prometheus dropped about 293k iterations because each query takes roughly 1–3 seconds — it cannot keep up at 2,000 req/s. JSONB breaks almost immediately because each query takes about 80 seconds (JSONB containment plus heap fetch for every row).
+## Disk
 
-Note: Prometheus p95 latency varies between runs (~1.9–3.1 s). Latency at the breaking point is noisier than the mean — treat it as a range, not a single number.
+| System | On disk | Bytes / sample |
+|--------|---------|----------------|
+| Prometheus | 3.3 MB | 12.18 |
+| PostgreSQL normalized | 101.9 MB | 370.88 |
+| PostgreSQL JSONB | 230.2 MB | 838.25 |
 
-## Five query scenarios — measured vs defined
+Most of the gap is repeated identity. JSONB stores the full label document on every row, so `env="production"` is written a million times. The normalized schema avoids that, but still pays for a row header, index entries and WAL per sample. Prometheus stores each label set once, then only a timestamp and a value. Timestamps are delta-of-delta encoded and values use Gorilla XOR, so a steady scrape costs close to nothing.
 
-The benchmark defines **five query shapes** in `benchctl/shared/queries.py`, each with a PromQL version and equivalent SQL for both PostgreSQL schemas. Only **q1** was executed through the k6 load test in run `gh-219.1`. The query-sweep phase (added to `benchctl/driver/run.py`) now measures per-query latency for all five shapes; results from that phase will be reported in a follow-up run.
+What does that mean in practice? One series scraped every 5 seconds for 30 days:
 
-| # | Scenario | PromQL | SQL equivalent | Measured in gh-219.1 |
-|---|----------|--------|----------------|----------------------|
-| q1 | Counter rate across every counter series | `sum(rate(http_requests_total[5m]))` | `lag() OVER (PARTITION BY ...)` window over 5m range | **Yes** — k6 breaking point |
-| q2 | Grouped aggregation by job | `sum by (job) (queue_depth)` | `GROUP BY job` with `avg(value)` | No — defined, not measured |
-| q3 | Per-series p90 over 1 hour | `quantile_over_time(0.9, queue_depth{job="job-00"}[1h])` | `percentile_cont(0.9) WITHIN GROUP` | No — defined, not measured |
-| q4 | Selective wide: one job across full window | `sum(queue_depth{job="job-00"})` | `WHERE s.job = 'job-00'` + `avg(value)` | No — defined, not measured |
-| q5 | Short range: single series, 15 minutes | `queue_depth{instance="host-0000"}` | `WHERE s.instance = 'host-0000'` + `avg(value)` | No — defined, not measured |
+| Store | One series | 10,000 series |
+|-------|-----------|---------------|
+| Prometheus | 6.3 MB | 63 GB |
+| PostgreSQL normalized | 192.3 MB | 1.92 TB |
+| PostgreSQL JSONB | 434.5 MB | 4.35 TB |
 
-**Winner expectations** (from architectural intent, not gh-219.1 measurement): q1 → Prometheus; q2 → even; q3 → PostgreSQL; q4 → Prometheus; q5 → PostgreSQL. These are hypotheses to verify with the query-sweep phase, not claims from this run.
+This is extrapolated from the measured bytes per sample, so treat it as an order of magnitude.
 
-## What PostgreSQL genuinely wins
+On GCP (`us-central1`, list prices as of October 2026, storage only), Hyperdisk Balanced is $0.08 per GiB-month and Cloud SQL for PostgreSQL SSD is $0.17 per GiB-month:
 
-If this post only said "PostgreSQL is slow," it would be wrong. The architecture shows PostgreSQL genuinely wins in three areas:
+| Store | 1 series | 1,000 series | 10,000 series |
+|-------|----------|--------------|---------------|
+| Prometheus, Hyperdisk Balanced | $0.0005 | $0.47 | $4.70 |
+| PostgreSQL normalized, Cloud SQL SSD | $0.03 | $30 | $304 |
+| PostgreSQL JSONB, Cloud SQL SSD | $0.07 | $69 | $688 |
 
-1. **Percentiles over a time range.** `percentile_cont(0.9) WITHIN GROUP (ORDER BY value)` sorts inside the database and is not subject to Prometheus's `--query.max-samples` ceiling (default 50M). Prometheus's `quantile_over_time` sorts in RAM and is capped.
-2. **Single-series point lookups.** Retrieving one series at one timestamp is under 1 ms in PostgreSQL thanks to B-tree / BRIN point lookups.
-3. **Complex SQL and joins.** PromQL is a closed language. PostgreSQL lets you join metrics directly with business data (customers, transactions) in a single query.
+At 10,000 series that is $304 a month before the instance, and $688 if the labels stay in JSONB. HA storage doubles the Cloud SQL rate, backups are billed separately, and GCP bills in GiB while the sizes above are decimal, so a naive multiply comes out about 7% higher.
 
-## Honesty caveats — the answer I wish I had given
+## Query latency
 
-1. **Sum parity is not verified.** The Prometheus sum (154M) vs PostgreSQL sum (452M) differ by ~3×. I deliberately did not claim sum parity; sample *count* matches within 0.6% (−800 out of 144,000). The sum gap is unexplained and recorded as diagnostic only.
-2. **Prometheus lost 0.6% of samples** (143,200 vs 144,000). Documented, not hidden.
-3. **Not yet compacted.** The 45-minute window is below Prometheus's compaction threshold (~3 h of head span), so the disk figure reflects head chunks, not steady-state on-disk blocks.
-4. **CPU/RAM is absent from this report.** The CI environment could not expose cAdvisor container metrics to the runner; those metrics flow to Grafana Cloud but are not published here.
-5. **Only q1 was measured under load.** The k6 leg tested `sum(rate(http_requests_total[5m]))` only. q2–q5 are defined in the query catalog with PromQL + SQL equivalents, and the query-sweep phase can measure them in a follow-up run.
-6. **Some figures are literature, not measured.** The ~1.37 B/sample Gorilla figure and TimescaleDB's 90–95% compression claim come from papers and documentation, not from this benchmark.
+The five query shapes, run on all three stores (one connection, warm cache, p50 of 30 runs):
 
-## The answer I wish I had given
+| Shape | Prometheus | Postgres normalized | Postgres JSONB |
+|-------|-----------|---------------------|----------------|
+| q1: rate across all counters | 3.0 ms | 63.9 ms | 874.3 ms |
+| q2: sum by job | 2.6 ms | 31.1 ms | 71.0 ms |
+| q3: p90 per instance, 1 h | 9.5 ms | 12.2 ms | 45.5 ms |
+| q4: one job, full window | 1.6 ms | 7.1 ms | 21.8 ms |
+| q5: one instance, 15 min | 0.52 ms | **0.14 ms** | 0.23 ms |
 
-If I met the Head of Platform again, I would not say "PostgreSQL can do it too." I would say:
+- **q1** is the biggest gap. Postgres needs `lag() OVER (PARTITION BY ...)`, which orders and walks every row, and JSONB adds a heap fetch per row. Prometheus reads a slice that was already sorted when written. Part of this gap is window size: Prometheus computes a 5-minute rate, Postgres walks all 45 minutes.
+- **q3** surprised me. I expected percentiles to favor Postgres, but Prometheus still won at this scale. I wouldn't draw a conclusion until N is much larger.
+- **q5** is a clean Postgres win. A short lookup on one series is a B-tree hit, and 0.14 ms is hard to beat.
 
-> "PostgreSQL can store metrics, but you pay for it: tuple headers, index bloat, per-sample WAL, and a heap fetch every time you ask 'what is the value of this label?' Prometheus refuses those costs — no in-place UPDATE, no selective DELETE, no one row per sample. In exchange it gets a read-only, sequential, compressed structure where decompression is nearly free. The price is operational rigidity."
+## Under load
 
-| Situation | Choose |
-|-----------|--------|
-| Infrastructure monitoring, Kubernetes, real-time alerting | **Prometheus** |
-| Multi-year time-series retention, joining metrics with business data | **PostgreSQL + TimescaleDB** (or hybrid) |
-| SQL percentiles without a sample ceiling, ad-hoc reporting | **PostgreSQL** |
-| High cardinality, long retention, disk cost is critical | **Prometheus** |
+I ramped q1 from 10 to 2,000 requests per second with k6. All three systems eventually fell over, so this shows saturation, not latency.
 
-## Reproduce
+| System | Completed | p95 |
+|--------|-----------|-----|
+| Prometheus | 169,841 | 1.8 s |
+| PostgreSQL normalized | 4,894 | 5.1 s |
+| PostgreSQL JSONB | 443 | 52.5 s |
 
-The entire benchmark runs automatically on GitHub Actions at `github.com/hungpham10/my-benchmarks` (directory `benchctl/`). The numbers in this post come from run `gh-219.1` on the `main` branch. You can run `scale=smoke` (~3 minutes) to verify parity checks yourself, then `scale=pg` (~31 minutes) for the full picture. The query-sweep phase (q1–q5 per-query latency) is part of the `scale=pg` pipeline.
+Prometheus served about 35× more queries than normalized Postgres and 383× more than JSONB.
 
----
+## Where Postgres is the better choice
 
-*All figures come from a single GitHub Actions workflow run (scale=pg, run `gh-219.1`), Prometheus 3.15.0 vs PostgreSQL 18.6, each capped at 1.5 CPU / 4 GB. The company name and the Head of Platform are withheld by request.*
+- Short, single-series lookups (q5).
+- Percentiles with no sample cap. `percentile_cont` isn't bound by Prometheus's `--query.max-samples`, which matters at very large N.
+- Joins. PromQL can't join metrics to customers or transactions; SQL can.
+- Retention. Dropping a partition is O(1), while Prometheus has to rewrite blocks at the next compaction.
+
+## What I'd say now
+
+> PostgreSQL can store metrics, but every sample pays for a tuple header, index entries, WAL, and the label identity it has to restate. In my test that came to 30× to 69× more disk and up to about 290× slower on a counter-rate query, though part of that last gap is the wider window Postgres scanned. Prometheus avoids all of it: no UPDATE, no per-sample row, near-free compression. In return it is rigid. If you need joins, uncapped percentiles, or long retention next to business data, Postgres is a reasonable choice and sometimes the better one.
+
+| Situation | Use |
+|-----------|-----|
+| Infrastructure monitoring, real-time alerts | Prometheus |
+| High cardinality, disk cost matters | Prometheus |
+| Metrics joined to business data, long retention | PostgreSQL |
+| Ad-hoc SQL reporting, uncapped percentiles | PostgreSQL |
+
+My interview answer was half right. Disk and `rate()` were worse on Postgres, as I said. But I blamed the index, and the data points at identity: the two Postgres schemas hold the same rows and still differ by 2.3×, which is the label document repeated on every row. And I didn't expect Postgres to win any shape, but it won one.
+
+## Limitations
+
+- The scale is small (1,600 series, 288,000 samples). It shows the shape of the costs, not how they grow, and q3 could flip.
+- The run lasted 45 minutes with no compaction, so the disk figures are for head data.
+- The engines don't always scan the same window (q1 is the clearest case), so latencies compare cost per shape, not identical work.
+- Prometheus kept 0.56% fewer samples than Postgres, and I haven't found out why.
+- I measured no CPU or RAM, and used `latest` images without recording digests.
+
+The full code is in `benchctl/` at `github.com/hungpham10/my-benchmarks`; the numbers come from run `gh-232.1`.
