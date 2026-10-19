@@ -53,7 +53,7 @@ So I built a benchmark. Same data, three stores, five query shapes, and every nu
 ## The short version
 
 - **Disk:** Prometheus 12.18 bytes/sample, PostgreSQL normalized 370.88, PostgreSQL JSONB 838.25. That is 30× and 69× smaller.
-- **One series, 30 days, 5-second scrape:** 6.3 MB on Prometheus, 192.3 MB on normalized Postgres, 434.5 MB on JSONB.
+- **One series, 30 days, 5-second scrape:** 6.3 MB on Prometheus, 192.3 MB on normalized Postgres, 434.5 MB on JSONB. At 10,000 series that is $4.70, $304 and $688 per month of GCP storage.
 - **Latency:** Prometheus was fastest on four of the five query shapes. Normalized Postgres won the fifth, a single series over 15 minutes (0.14 ms vs 0.52 ms).
 - **Counter rate across all 1,600 series:** 3.0 ms on Prometheus, 63.9 ms on normalized Postgres, 874.3 ms on JSONB. Roughly 21× and 290×.
 - **Saturation:** with the same load ramp, Prometheus completed 169,841 queries, normalized Postgres 4,894, JSONB 443.
@@ -154,7 +154,15 @@ The objection usually arrives as a small trade: a bit more disk and a bit more R
 | PostgreSQL normalized | 192.3 MB | +186.0 MB | 1.92 TB |
 | PostgreSQL JSONB | 434.5 MB | +428.2 MB | 4.35 TB |
 
-At a list price of $0.08 per GB-month, the extra disk is about $0.015 per series per month on the normalized schema and $0.035 on JSONB. That is nothing for one series. At 10,000 series it is $154 and $348 per month, for storage alone, before IOPS and backups.
+GCP makes the difference concrete. In `us-central1`, list prices as of October 2026, Hyperdisk Balanced (a reasonable disk for self-managed Prometheus) is $0.08 per GiB-month, and Cloud SQL for PostgreSQL SSD is $0.17 per GiB-month. Storage only, no compute, no backups, no HA:
+
+| Store | 1 series | 1,000 series | 10,000 series |
+|-------|----------|--------------|---------------|
+| Prometheus, Hyperdisk Balanced | $0.0005 | $0.47 | $4.70 |
+| PostgreSQL normalized, Cloud SQL SSD | $0.03 | $30 | $304 |
+| PostgreSQL JSONB, Cloud SQL SSD | $0.07 | $69 | $688 |
+
+The single-series column is why the argument sounds harmless: three cents a month on the normalized schema, seven on JSONB. The 10,000-series column is why it isn't: $304 a month before the instance, and $688 if the labels stay in JSONB. HA storage doubles the Cloud SQL rate, and backups are billed separately. GCP bills in GiB while the sizes above are decimal, which is why a naive multiply comes out about 7% higher.
 
 Two caveats on the arithmetic. It multiplies the measured bytes per sample by the sample count, so it assumes the ratio holds at 30 days; the run itself lasted 45 minutes and nothing was compacted. A compacted Prometheus would likely sit at or below 12.18 B/sample, and Postgres would also accumulate dead tuples between VACUUMs. Treat it as an order of magnitude, not an invoice.
 

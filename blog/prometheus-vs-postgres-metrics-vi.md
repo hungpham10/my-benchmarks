@@ -52,7 +52,7 @@ Nên tôi dựng một benchmark. Cùng dữ liệu, ba store, năm hình dạng
 ## Bản tóm tắt
 
 - **Đĩa:** Prometheus 12.18 bytes/sample, PostgreSQL chuẩn hóa 370.88, PostgreSQL JSONB 838.25. Tức là nhỏ hơn 30× và 69×.
-- **Một series, 30 ngày, scrape 5 giây:** 6.3 MB trên Prometheus, 192.3 MB trên Postgres chuẩn hóa, 434.5 MB trên JSONB.
+- **Một series, 30 ngày, scrape 5 giây:** 6.3 MB trên Prometheus, 192.3 MB trên Postgres chuẩn hóa, 434.5 MB trên JSONB. Ở 10,000 series, đó là $4.70, $304 và $688 mỗi tháng cho lưu trữ GCP.
 - **Độ trễ:** Prometheus nhanh nhất ở bốn trong năm hình dạng. Postgres chuẩn hóa thắng cái thứ năm, một series trong 15 phút (0.14 ms so với 0.52 ms).
 - **Counter rate trên cả 1,600 series:** 3.0 ms trên Prometheus, 63.9 ms trên Postgres chuẩn hóa, 874.3 ms trên JSONB. Khoảng 21× và 290×.
 - **Bão hòa:** cùng một ramp tải, Prometheus hoàn thành 169,841 truy vấn, Postgres chuẩn hóa 4,894, JSONB 443.
@@ -153,7 +153,15 @@ Phản biện thường được nói như một trade nhỏ: thêm chút đĩa,
 | PostgreSQL chuẩn hóa | 192.3 MB | +186.0 MB | 1.92 TB |
 | PostgreSQL JSONB | 434.5 MB | +428.2 MB | 4.35 TB |
 
-Với giá list $0.08 mỗi GB-tháng, phần đĩa thêm khoảng $0.015 mỗi series mỗi tháng ở schema chuẩn hóa và $0.035 ở JSONB. Một series thì chẳng đáng gì. 10,000 series là $154 và $348 mỗi tháng, chỉ cho lưu trữ, chưa tính IOPS và backup.
+GCP làm khoảng cách đó cụ thể. Ở `us-central1`, giá list tháng 10/2026, Hyperdisk Balanced (một lựa chọn hợp lý cho Prometheus tự vận hành) là $0.08 mỗi GiB-tháng, còn Cloud SQL for PostgreSQL SSD là $0.17 mỗi GiB-tháng. Chỉ tính lưu trữ, chưa có compute, backup hay HA:
+
+| Lưu trữ | 1 series | 1,000 series | 10,000 series |
+|-------|----------|--------------|---------------|
+| Prometheus, Hyperdisk Balanced | $0.0005 | $0.47 | $4.70 |
+| PostgreSQL chuẩn hóa, Cloud SQL SSD | $0.03 | $30 | $304 |
+| PostgreSQL JSONB, Cloud SQL SSD | $0.07 | $69 | $688 |
+
+Cột một series là lý do lập luận nghe có vẻ vô hại: ba cent một tháng ở schema chuẩn hóa, bảy cent ở JSONB. Cột 10,000 series là lý do nó không vô hại: $304 một tháng trước khi tính instance, và $688 nếu label vẫn nằm trong JSONB. Storage HA nhân đôi giá Cloud SQL, backup tính riêng. GCP tính theo GiB còn kích thước ở bảng trên là decimal, nên nhân trực tiếp sẽ ra cao hơn khoảng 7%.
 
 Hai lưu ý về phép tính. Nó nhân bytes/sample đo được với số sample, tức giả định tỉ lệ giữ nguyên ở 30 ngày; run thật chỉ kéo dài 45 phút và chưa có gì được compact. Prometheus đã compact có thể ở mức 12.18 B/sample hoặc thấp hơn, còn Postgres cũng sẽ tích dead tuple giữa các lần VACUUM. Hãy đọc đây là bậc độ lớn, không phải hóa đơn.
 
