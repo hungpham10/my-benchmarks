@@ -53,6 +53,7 @@ So I built a benchmark. Same data, three stores, five query shapes, and every nu
 ## The short version
 
 - **Disk:** Prometheus 12.18 bytes/sample, PostgreSQL normalized 370.88, PostgreSQL JSONB 838.25. That is 30× and 69× smaller.
+- **One series, 30 days, 5-second scrape:** 6.3 MB on Prometheus, 192.3 MB on normalized Postgres, 434.5 MB on JSONB.
 - **Latency:** Prometheus was fastest on four of the five query shapes. Normalized Postgres won the fifth, a single series over 15 minutes (0.14 ms vs 0.52 ms).
 - **Counter rate across all 1,600 series:** 3.0 ms on Prometheus, 63.9 ms on normalized Postgres, 874.3 ms on JSONB. Roughly 21× and 290×.
 - **Saturation:** with the same load ramp, Prometheus completed 169,841 queries, normalized Postgres 4,894, JSONB 443.
@@ -142,6 +143,22 @@ All five shapes run on both schemas and on Prometheus, from `benchctl/shared/que
 Most of the gap is label text. JSONB repeats the whole label document on every row, and `env="production"` gets stored a million times because Postgres doesn't intern strings. The normalized schema keeps rows small, but it still carries label text per row and the `(series_id, time)` index adds its own weight. Prometheus stores each label set once in its index and writes each sample as a timestamp and a value.
 
 Those two numbers are cheap because of how they are encoded. Timestamps use delta-of-delta, so with a steady scrape interval they cost about one bit each. Values use Gorilla XOR. None of this needed a compaction pass. It happens as samples arrive, because they arrive in time order.
+
+## What "a bit more disk" means
+
+The objection usually arrives as a small trade: a bit more disk and a bit more RAM, and the team gets one database to operate. It is worth putting a number on "a bit", because bytes per sample is the wrong unit for that argument. One series at a 5-second scrape over 30 days is 518,400 samples.
+
+| Storage | 30 days, one series | Extra over Prometheus | 10,000 series |
+|---------|--------------------|-----------------------|---------------|
+| Prometheus | 6.3 MB | — | 63 GB |
+| PostgreSQL normalized | 192.3 MB | +186.0 MB | 1.92 TB |
+| PostgreSQL JSONB | 434.5 MB | +428.2 MB | 4.35 TB |
+
+At a list price of $0.08 per GB-month, the extra disk is about $0.015 per series per month on the normalized schema and $0.035 on JSONB. That is nothing for one series. At 10,000 series it is $154 and $348 per month, for storage alone, before IOPS and backups.
+
+Two caveats on the arithmetic. It multiplies the measured bytes per sample by the sample count, so it assumes the ratio holds at 30 days; the run itself lasted 45 minutes and nothing was compacted. A compacted Prometheus would likely sit at or below 12.18 B/sample, and Postgres would also accumulate dead tuples between VACUUMs. Treat it as an order of magnitude, not an invoice.
+
+RAM is the part I cannot cost from this run, because the harness did not capture container memory. What can be said structurally: Prometheus keeps only the active head window in memory and reads compacted blocks from disk. Postgres keeps `shared_buffers` plus the working set each query touches, and a 30-day `lag()` or percentile touches a lot more of it. I would not quote a RAM multiplier without measuring one.
 
 ## Why Prometheus is smaller and faster
 

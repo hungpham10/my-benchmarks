@@ -52,6 +52,7 @@ Nên tôi dựng một benchmark. Cùng dữ liệu, ba store, năm hình dạng
 ## Bản tóm tắt
 
 - **Đĩa:** Prometheus 12.18 bytes/sample, PostgreSQL chuẩn hóa 370.88, PostgreSQL JSONB 838.25. Tức là nhỏ hơn 30× và 69×.
+- **Một series, 30 ngày, scrape 5 giây:** 6.3 MB trên Prometheus, 192.3 MB trên Postgres chuẩn hóa, 434.5 MB trên JSONB.
 - **Độ trễ:** Prometheus nhanh nhất ở bốn trong năm hình dạng. Postgres chuẩn hóa thắng cái thứ năm, một series trong 15 phút (0.14 ms so với 0.52 ms).
 - **Counter rate trên cả 1,600 series:** 3.0 ms trên Prometheus, 63.9 ms trên Postgres chuẩn hóa, 874.3 ms trên JSONB. Khoảng 21× và 290×.
 - **Bão hòa:** cùng một ramp tải, Prometheus hoàn thành 169,841 truy vấn, Postgres chuẩn hóa 4,894, JSONB 443.
@@ -117,6 +118,7 @@ Cả năm hình dạng chạy trên hai schema và trên Prometheus, từ `bench
 - **Lấy toàn bộ kết quả.** Mỗi lượt gọi `fetchall()`, nên latency gồm cả việc truyền row chứ không chỉ thực thi plan.
 
 ## Đĩa
+
 | Hệ thống | Sample giữ lại | Trên đĩa | Bytes / sample |
 |--------|--------------|---------|----------------|
 | Prometheus TSDB | 286,400 | 3.3 MB | 12.18 |
@@ -140,6 +142,22 @@ Cả năm hình dạng chạy trên hai schema và trên Prometheus, từ `bench
 Phần lớn khoảng cách là văn bản nhãn. JSONB lặp toàn bộ label document trên từng row, và `env="production"` bị lưu cả triệu lần vì Postgres không intern string. Schema chuẩn hóa giữ row nhỏ, nhưng vẫn mang label text trên mỗi row và index `(series_id, time)` cộng thêm trọng lượng của nó. Prometheus lưu mỗi label set một lần trong index và ghi mỗi sample như một timestamp và một value.
 
 Hai con số đó rẻ vì cách chúng được mã hóa. Timestamp dùng delta-of-delta, nên với interval scrape ổn định chúng tốn khoảng một bit mỗi cái. Value dùng Gorilla XOR. Không phần nào cần một lượt compaction. Nó xảy ra ngay khi sample đến, vì chúng đến theo thứ tự thời gian.
+
+## "Thêm chút đĩa" là bao nhiêu
+
+Phản biện thường được nói như một trade nhỏ: thêm chút đĩa, thêm chút RAM, đổi lại team chỉ phải vận hành một database. Đáng để quy "một chút" ra số, vì bytes trên sample là đơn vị sai cho lập luận đó. Một series scrape 5 giây trong 30 ngày là 518,400 sample.
+
+| Lưu trữ | 30 ngày, một series | Thêm so với Prometheus | 10,000 series |
+|---------|--------------------|-----------------------|---------------|
+| Prometheus | 6.3 MB | — | 63 GB |
+| PostgreSQL chuẩn hóa | 192.3 MB | +186.0 MB | 1.92 TB |
+| PostgreSQL JSONB | 434.5 MB | +428.2 MB | 4.35 TB |
+
+Với giá list $0.08 mỗi GB-tháng, phần đĩa thêm khoảng $0.015 mỗi series mỗi tháng ở schema chuẩn hóa và $0.035 ở JSONB. Một series thì chẳng đáng gì. 10,000 series là $154 và $348 mỗi tháng, chỉ cho lưu trữ, chưa tính IOPS và backup.
+
+Hai lưu ý về phép tính. Nó nhân bytes/sample đo được với số sample, tức giả định tỉ lệ giữ nguyên ở 30 ngày; run thật chỉ kéo dài 45 phút và chưa có gì được compact. Prometheus đã compact có thể ở mức 12.18 B/sample hoặc thấp hơn, còn Postgres cũng sẽ tích dead tuple giữa các lần VACUUM. Hãy đọc đây là bậc độ lớn, không phải hóa đơn.
+
+RAM là phần tôi không thể tính từ run này, vì harness không thu thập memory của container. Điều có thể nói về cấu trúc: Prometheus chỉ giữ cửa sổ head đang hoạt động trong bộ nhớ và đọc block đã compact từ đĩa. Postgres giữ `shared_buffers` cộng working set mà mỗi truy vấn chạm vào, và một `lag()` hay percentile trên 30 ngày chạm vào nhiều hơn hẳn. Tôi sẽ không đưa ra hệ số RAM khi chưa đo.
 
 ## Tại sao Prometheus nhỏ hơn và nhanh hơn
 
