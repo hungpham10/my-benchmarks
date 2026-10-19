@@ -115,6 +115,20 @@ Schema thứ hai là mức tốt nhất Postgres làm được cho access patter
 | PostgreSQL chuẩn hóa | 101.9 MB | 370.88 |
 | PostgreSQL JSONB | 230.2 MB | 838.25 |
 
+<svg role="img" aria-labelledby="chart-disk-title chart-disk-desc" viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
+  <title id="chart-disk-title">Dung lượng đĩa — bytes trên mỗi sample</title>
+  <desc id="chart-disk-desc">Biểu đồ cột ngang so sánh bytes trên sample: Prometheus 12.18, PostgreSQL chuẩn hóa 370.88, PostgreSQL JSONB 838.25.</desc>
+  <rect x="80" y="30" width="1" height="42" fill="#10b981" rx="2"/>
+  <rect x="80" y="90" width="28" height="42" fill="#3b82f6" rx="2"/>
+  <rect x="80" y="150" width="64" height="42" fill="#ef4444" rx="2"/>
+  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Prometheus</text>
+  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Postgres chuẩn hóa</text>
+  <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Postgres JSONB</text>
+  <text x="86" y="59" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">12.18</text>
+  <text x="112" y="119" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">370.88</text>
+  <text x="148" y="179" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">838.25</text>
+</svg>
+
 Phần lớn khoảng cách là identity bị lặp. JSONB lưu cả label document trên từng row, nên `env="production"` được ghi cả triệu lần. Schema chuẩn hóa tránh được điều đó, nhưng vẫn trả cho row header, index entry và WAL mỗi sample. Prometheus lưu mỗi label set một lần, sau đó chỉ còn timestamp và value. Timestamp dùng delta-of-delta, value dùng Gorilla XOR, nên một scrape ổn định gần như không tốn gì.
 
 Điều đó nghĩa là gì trên thực tế? Một series scrape 5 giây trong 30 ngày:
@@ -149,6 +163,34 @@ Năm hình dạng truy vấn, chạy trên cả ba store (một kết nối, cac
 | q4: một job, toàn cửa sổ | 1.6 ms | 7.1 ms | 21.8 ms |
 | q5: một instance, 15 phút | 0.52 ms | **0.14 ms** | 0.23 ms |
 
+<svg role="img" aria-labelledby="chart-q-title chart-q-desc" viewBox="0 0 640 270" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
+  <title id="chart-q-title">Độ trễ truy vấn theo hình dạng — p50, milliseconds (thang log)</title>
+  <desc id="chart-q-desc">Cột nhóm so sánh p50 cho năm hình dạng truy vấn giữa Prometheus, PostgreSQL JSONB và PostgreSQL chuẩn hóa. Prometheus thắng q1 đến q4; Postgres chuẩn hóa thắng q5.</desc>
+  <text x="16" y="20" font-family="system-ui, sans-serif" font-size="12" fill="currentColor" fill-opacity="0.7">p50 ms (thang log)</text>
+  <g font-family="system-ui, sans-serif" font-size="11" fill="currentColor">
+    <text x="16" y="70">q1</text><text x="16" y="115">q2</text><text x="16" y="160">q3</text><text x="16" y="205">q4</text><text x="16" y="250">q5</text>
+  </g>
+  <g>
+    <rect x="50" y="52" width="12" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="70" width="110" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="88" width="89" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="97" width="21" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="115" width="83" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="133" width="70" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="142" width="38" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="160" width="77" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="178" width="50" height="16" fill="#3b82f6" rx="2"/>
+    <rect x="50" y="187" width="21" height="16" fill="#10b981" rx="2"/>
+    <rect x="66" y="205" width="61" height="16" fill="#ef4444" rx="2"/>
+    <rect x="66" y="223" width="40" height="16" fill="#3b82f6" rx="2"/>
+  </g>
+  <g font-family="system-ui, sans-serif" font-size="11" fill="currentColor" fill-opacity="0.7">
+    <rect x="420" y="52" width="10" height="10" fill="#10b981" rx="1"/><text x="436" y="61">Prometheus</text>
+    <rect x="420" y="70" width="10" height="10" fill="#ef4444" rx="1"/><text x="436" y="79">Postgres JSONB</text>
+    <rect x="420" y="88" width="10" height="10" fill="#3b82f6" rx="1"/><text x="436" y="97">Postgres chuẩn hóa + BRIN</text>
+  </g>
+</svg>
+
 - **q1** là khoảng cách lớn nhất. Postgres cần `lag() OVER (PARTITION BY ...)`, phải sắp xếp và đi qua từng row, còn JSONB thêm một heap fetch mỗi row. Prometheus đọc một slice đã được sắp xếp từ lúc ghi. Một phần khoảng cách là kích thước cửa sổ: Prometheus tính rate 5 phút, Postgres đi cả 45 phút.
 - **q3** làm tôi bất ngờ. Tôi tưởng percentile sẽ có lợi cho Postgres, nhưng Prometheus vẫn thắng ở scale này. Tôi không kết luận cho đến khi N lớn hơn nhiều.
 - **q5** là chiến thắng rõ ràng của Postgres. Một tra cứu ngắn trên một series là một cú B-tree, và 0.14 ms rất khó đánh bại.
@@ -162,6 +204,20 @@ Tôi ramp q1 từ 10 lên 2,000 request/giây bằng k6. Cả ba hệ thống cu
 | Prometheus | 169,841 | 1.8 s |
 | PostgreSQL chuẩn hóa | 4,894 | 5.1 s |
 | PostgreSQL JSONB | 443 | 52.5 s |
+
+<svg role="img" aria-labelledby="chart-break-title chart-break-desc" viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; height:auto; background:transparent;">
+  <title id="chart-break-title">Số iteration hoàn thành trên toàn bộ ramp</title>
+  <desc id="chart-break-desc">Biểu đồ cột ngang số iteration hoàn thành: Prometheus 169,841, PostgreSQL chuẩn hóa 4,894, PostgreSQL JSONB 443.</desc>
+  <rect x="80" y="30" width="64" height="42" fill="#10b981" rx="2"/>
+  <rect x="80" y="90" width="2" height="42" fill="#3b82f6" rx="2"/>
+  <rect x="80" y="150" width="1" height="42" fill="#ef4444" rx="2"/>
+  <text x="70" y="60" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Prometheus</text>
+  <text x="70" y="120" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Postgres chuẩn hóa</text>
+  <text x="70" y="180" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="currentColor">Postgres JSONB</text>
+  <text x="148" y="59" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">169,841</text>
+  <text x="86" y="119" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">4,894</text>
+  <text x="86" y="179" font-family="system-ui, sans-serif" font-size="12" fill="currentColor">443</text>
+</svg>
 
 Prometheus phục vụ khoảng 35× số truy vấn so với Postgres chuẩn hóa và 383× so với JSONB.
 
