@@ -86,9 +86,9 @@ jobs:
         # does not exist would run whatever is on disk.
         run: |
           SCENARIO="scenarios/${{ inputs.scenario }}.yaml"
-          if [ ! -f "$SCENARIO" ]; then
-            echo "::error::no such scenario file: $SCENARIO"
-            ls scenarios/ || true
+          if [ ! -f "benchctl/$SCENARIO" ]; then
+            echo "::error::no such scenario file: benchctl/$SCENARIO"
+            ls benchctl/scenarios/ || true
             exit 1
           fi
           echo "SCENARIO=$SCENARIO" >> "$GITHUB_ENV"
