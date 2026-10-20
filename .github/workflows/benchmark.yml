@@ -1,51 +1,60 @@
-# benchctl pipeline.
+# The benchctl pipeline.
 #
-# One way in: workflow_dispatch. Nothing runs on a schedule and nothing runs
-# on a pull request — a benchmark that runs by itself spends the runner's
-# minutes on a result nobody asked for, and a nightly job that opens a PR
-# nobody reads is worse than no nightly job.
+# This file is the pipeline; the scenario files are the entry points. Each
+# scenario has its own workflow next to this one (prom-load.yml, pg-load.yml,
+# fs.yml) and calls this file with `uses:`. That split is what makes the
+# scenarios independent:
 #
-# The input is the name of a scenario file in benchctl/scenarios/. The name
-# in the dropdown is the file's base name, so "fs" means
-# benchctl/scenarios/fs.yaml. Adding a benchmark is a new yaml file plus one
-# line in the dropdown — the pipeline below does not change.
+#   - each one has its own timeout, its own concurrency group and its own
+#     artifact retention, so a filesystem run cannot eat the budget of a
+#     Prometheus run
+#   - a scenario that needs the filesystem tooling asks for it, instead of
+#     every run installing packages it does not use
+#   - adding a benchmark is one new workflow file and one new yaml under
+#     benchctl/scenarios/ — the pipeline below does not change
 #
-# The system under test is on `:latest`, so the numbers describe whatever the
-# tag resolved to on the day of the run. That is why the run id and the image
-# digest travel with the results.
+# The pipeline body lives here exactly once. A step that exists in two
+# copies is a step that exists in one version.
 
 name: benchmark
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       scenario:
-        description: Scenario (benchctl/scenarios/<name>.yaml)
-        type: choice
-        options: [prom-load, pg-load, fs]
-        default: prom-load
+        description: Scenario file under benchctl/scenarios/, without .yaml
+        required: true
+        type: string
       publish:
         description: Open a PR with the results
-        type: boolean
+        required: false
         default: false
+        type: boolean
+      timeout_minutes:
+        description: How long the job may run
+        required: false
+        default: 60
+        type: number
+      artifact_days:
+        description: How long the results artifact is kept
+        required: false
+        default: 90
+        type: number
 
 permissions:
   contents: read
 
-concurrency:
-  # One run at a time. Two concurrent benches would measure each other.
-  group: benchmark-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   bench:
     runs-on: ubuntu-latest
-    # The longest scenario is fs: four legs, each with a bulk load, a query
-    # sweep, a load phase and a cold-cache phase. 120 minutes covers it with
-    # room for a slow runner.
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.timeout_minutes }}
 
-    # No default working directory; steps specify their own
+    # One run of the same scenario at a time. Two concurrent benches would
+    # measure each other. Different scenarios may run at the same time:
+    # they are different measurements.
+    concurrency:
+      group: benchmark-${{ inputs.scenario }}
+      cancel-in-progress: false
 
     permissions:
       contents: write
@@ -81,9 +90,9 @@ jobs:
           df -h "$RUNNER_TEMP" | tail -1
 
       - name: Select scenario
-        # The dropdown holds the base name of a file in benchctl/scenarios/.
-        # Fail loudly when the file is missing: a scenario that silently
-        # does not exist would run whatever is on disk.
+        # The scenario is a file in benchctl/scenarios/. Fail loudly when it
+        # is missing: a scenario that silently does not exist would run
+        # whatever is on disk.
         run: |
           SCENARIO="scenarios/${{ inputs.scenario }}.yaml"
           if [ ! -f "benchctl/$SCENARIO" ]; then
@@ -102,15 +111,17 @@ jobs:
         run: pip install numpy cramjam pyyaml 'psycopg[binary]'
 
       - name: Install filesystem tools
-        # The filesystem matrix formats real filesystems on the runner's loop
-        # devices, so the tools that do it have to be there: xfsprogs and
-        # btrfs-progs are not preinstalled, and ZFS needs its kernel module,
-        # which on the runner's kernel comes from linux-modules-extra rather
-        # than from the kernel image the runner booted.
+        # Only the filesystem scenario formats real filesystems on the
+        # runner's loop devices, so only it needs the tools that do it:
+        # xfsprogs and btrfs-progs are not preinstalled, and ZFS needs its
+        # kernel module, which on the runner's kernel comes from
+        # linux-modules-extra rather than from the kernel image the runner
+        # booted.
         #
         # The extra-modules package is best effort: it does not exist for
         # every kernel a runner might boot, and a missing ZFS module is
         # recorded as a gap in the results, not as a failed run.
+        if: inputs.scenario == 'fs'
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -154,10 +165,14 @@ jobs:
         run: |
           (docker compose -f ../monitoring/compose.monitoring.yml down -v || docker-compose -f ../monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
           docker network rm benchctl-mon 2>/dev/null || true
-          # The filesystem matrix mounts filesystems on the runner. If the
-          # run died mid-leg, the mount and the loop device are still there.
-          # Only detach ours: `losetup -D` would take every loop device on
-          # the runner with it.
+
+      - name: Tear down the filesystems
+        # The filesystem scenario mounts filesystems on the runner. If the
+        # run died mid-leg, the mount and the loop device are still there.
+        # Only detach ours: `losetup -D` would take every loop device on
+        # the runner with it.
+        if: always() && inputs.scenario == 'fs'
+        run: |
           sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
           for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
             sudo losetup -d "$dev" 2>/dev/null || true
@@ -168,10 +183,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ github.run_number }}
+          name: results-${{ inputs.scenario }}-${{ github.run_number }}
           path: benchctl/results/
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ inputs.artifact_days }}
 
       - name: Summarise
         if: always()
@@ -195,11 +210,11 @@ jobs:
       # Opens a PR rather than pushing to main. Results are evidence, so a run
       # landing on main should be a diff somebody can read rather than a push.
       - name: Open a PR with the results
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        if: inputs.publish
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = `bench/run-${{ github.run_number }}`;
+            const branch = `bench/run-${{ github.run_number }}-${{ inputs.scenario }}`;
             const cwd = process.env.GITHUB_WORKSPACE;
             const { execSync } = require('child_process');
 

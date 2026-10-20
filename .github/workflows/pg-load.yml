@@ -1,0 +1,24 @@
+# Prometheus and PostgreSQL under the same ramp.
+#
+# Three systems, one ramp: the comparison needs them to be measured at the
+# same time, in the same envelope, with the same dataset.
+
+name: pg-load
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Open a PR with the results
+        type: boolean
+        default: false
+
+jobs:
+  bench:
+    uses: ./.github/workflows/benchmark.yml
+    with:
+      scenario: pg-load
+      publish: ${{ inputs.publish }}
+      timeout_minutes: 90
+      artifact_days: 90
+    secrets: inherit

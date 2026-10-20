@@ -1,0 +1,26 @@
+# The filesystem loadtest: one database, four filesystems.
+#
+# Four legs, each with a bulk load, a query sweep, a load phase and a
+# cold-cache phase — the longest scenario in the repo, which is why it has
+# its own budget and its own artifact retention. The results are the
+# evidence behind a published chapter, so they are kept longer.
+
+name: fs
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Open a PR with the results
+        type: boolean
+        default: false
+
+jobs:
+  bench:
+    uses: ./.github/workflows/benchmark.yml
+    with:
+      scenario: fs
+      publish: ${{ inputs.publish }}
+      timeout_minutes: 120
+      artifact_days: 180
+    secrets: inherit

@@ -35,9 +35,12 @@ catalogue:
 | `scenarios/pg-load.yaml` | Prometheus and PostgreSQL side by side under the same ramp |
 | `scenarios/fs.yaml` | One database on ext4, XFS, btrfs and ZFS |
 
-There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
-The dropdown is the scenario: `prom-load` or `pg-load` takes about twenty
-minutes, `fs` runs the filesystem matrix — four filesystems, one database —
+There is also a workflow per scenario: <kbd>Actions</kbd> → *prom-load* /
+*pg-load* / *fs* → *Run workflow*. Each one has its own budget, its own
+concurrency group and its own artifact retention, and each calls the same
+pipeline, [benchmark.yml](.github/workflows/benchmark.yml), so the steps
+exist exactly once. `prom-load` takes about twenty minutes, `pg-load` about
+thirty, `fs` runs the filesystem matrix — four filesystems, one database —
 in about an hour. Nothing runs on a schedule and nothing runs on a pull
 request; a benchmark that runs by itself spends the runner's minutes on a
 result nobody asked for.
