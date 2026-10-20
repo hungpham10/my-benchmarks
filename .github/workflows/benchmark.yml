@@ -61,6 +61,7 @@ jobs:
           import glob
           import json
           import os
+          import sys
 
           import yaml
 
@@ -88,10 +89,18 @@ jobs:
 
           if not entries:
               raise SystemExit(f"no scenario matched {want!r}")
-          print(f"matrix={json.dumps(entries)}")
+
+          # The matrix travels as {"include": [...]}: that is the shape
+          # GitHub accepts for a matrix built at run time. Anything else
+          # expands to nothing, and the run fails with no job at all.
+          print("matrix=" + json.dumps({"include": entries}))
+
+          # The human-readable version goes to the log, not to the output
+          # file: only "key=value" lines belong in there.
           for e in entries:
               print(f"  {e['scenario']}: timeout={e['timeout_minutes']}min, "
-                    f"artifact={e['artifact_days']}d, fs_tools={e['fs_tools']}")
+                    f"artifact={e['artifact_days']}d, fs_tools={e['fs_tools']}",
+                    file=sys.stderr)
           PY
 
   bench:
