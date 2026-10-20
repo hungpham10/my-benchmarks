@@ -173,9 +173,14 @@ def render_sharding(query_files, shape_files=None):
         except ValueError:
             continue
         q1 = d.get("q1_counter_rate", {})
-        scan = (shapes.get(extra) or {}).get("seq_scan", {})
+        leg = shapes.get(extra) or {}
+        # The parallel scan is the one without sum(float8): that aggregate
+        # is not partitionwise-compatible, it switches off the
+        # partitionwise aggregate, and with it the Parallel Append.
+        scan = leg.get("shard_scan") or leg.get("seq_scan", {})
+        serial = leg.get("seq_scan", {})
         plan = scan.get("plan") or q1.get("plan") or {}
-        rows.append((n, scan.get("p50_ms"), scan.get("max_ms"),
+        rows.append((n, scan.get("p50_ms"), serial.get("p50_ms"),
                      q1.get("p50_ms"), plan.get("workers_launched"),
                      plan.get("workers_planned"),
                      "Parallel Append" in (plan.get("nodes") or [])))
@@ -184,18 +189,20 @@ def render_sharding(query_files, shape_files=None):
     rows.sort()
     base = rows[0][1]
     out = ["## Sharding — One Scan Over N Shards"]
-    out.append("| Shards | scan p50 ms | scan max ms | counter-rate p50 ms | "
-               "speedup | efficiency | workers | parallel append |")
-    out.append("|--------|-------------|-------------|-------------------|"
-               "---------|------------|---------|----------------|")
-    for n, p50, pmax, q1_p50, launched, planned, parallel in rows:
+    out.append("| Shards | parallel scan p50 ms | with sum(float8) p50 ms | "
+               "counter-rate p50 ms | speedup | efficiency | workers | "
+               "parallel append |")
+    out.append("|--------|----------------------|------------------------|"
+               "-------------------|---------|------------|---------|"
+               "----------------|")
+    for n, p50, s_p50, q1_p50, launched, planned, parallel in rows:
         speedup = ""
         eff = ""
         if base and p50:
             speedup = f"{base / p50:.2f}x"
             eff = f"{base / p50 / n:.0%}"
         out.append(f"| {n} | {p50 if p50 is not None else 'n/a'} | "
-                   f"{pmax if pmax is not None else 'n/a'} | "
+                   f"{s_p50 if s_p50 is not None else 'n/a'} | "
                    f"{q1_p50 if q1_p50 is not None else 'n/a'} | {speedup} | "
                    f"{eff} | {launched if launched is not None else 'n/a'} | "
                    f"{'yes' if parallel else 'no'} |")
@@ -204,6 +211,13 @@ def render_sharding(query_files, shape_files=None):
                "divided by the number of shards, so 100% means the extra "
                "shards bought exactly what they should. workers is how many "
                "parallel workers the plan actually launched.")
+    out.append("")
+    out.append("The two scan columns are the same query with and without "
+               "`sum(float8)`. PostgreSQL cannot sum partial sums of a "
+               "double precision, so that one aggregate switches off the "
+               "partitionwise aggregate — and with it the Parallel Append. "
+               "The plan in the last column is the one the parallel scan "
+               "actually ran.")
     out.append("")
     return "\n".join(out)
 

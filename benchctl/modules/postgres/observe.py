@@ -291,6 +291,23 @@ READ_SHAPES = {
               AND s.metric = 'queue_depth'""",
     },
     "sharded": {
+        # The scan that answers the sharding question, and the same scan
+        # without sum(float8).
+        #
+        # sum(double precision) is not a partitionwise-compatible
+        # aggregate: PostgreSQL cannot add up partial sums of a float
+        # and get the same answer as summing the whole, so one float
+        # aggregate disables the partitionwise aggregate for the whole
+        # query. That in turn removes the Parallel Append, and the
+        # partitions end up scanned one after another by the leader.
+        #
+        # count(*) has no such problem, so it gets the plan this
+        # scenario is actually looking for: a Parallel Append over the
+        # shards, one worker per partition. Keeping both shapes is the
+        # point — the difference between them is the finding.
+        "shard_scan": """
+            SELECT count(*) FROM metrics_sharded m
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz""",
         "seq_scan": """
             SELECT count(*), sum(m.value) FROM metrics_sharded m
             WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz""",
@@ -382,6 +399,10 @@ def _setup_parallel(conn):
     cur.execute("SET min_parallel_index_scan_size = 0")
     cur.execute("SET parallel_setup_cost = 0")
     cur.execute("SET parallel_tuple_cost = 0")
+    # The default is on, but the sharding scenario depends on it, so it
+    # is asked for explicitly: without the partitionwise aggregate the
+    # planner has no Parallel Append to offer.
+    cur.execute("SET enable_partitionwise_aggregate = on")
     cur.close()
     return str(n)
 
@@ -443,9 +464,13 @@ def readshapes(variant=None):
                 "min_ms": round(times[0], 2),
                 "max_ms": round(times[-1], 2),
             }
-            # The plan of the full-table scan: this is the shape that says
-            # whether the shards were read in parallel or one after another.
-            if name == "seq_scan" and os.environ.get("BENCHCTL_PARALLEL_WORKERS"):
+            # The plan of the full-table scans: this is the shape that
+            # says whether the shards were read in parallel or one
+            # after another. Both scans are captured — the one with
+            # sum(float8) and the one without it — because the
+            # difference between their plans is the result.
+            if name in ("seq_scan", "shard_scan") and \
+                    os.environ.get("BENCHCTL_PARALLEL_WORKERS"):
                 try:
                     entry["plan"] = _explain(conn, text)
                 except Exception as e:  # noqa: BLE001 — diagnostic, never fatal
