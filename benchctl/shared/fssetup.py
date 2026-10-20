@@ -108,7 +108,12 @@ def _colima_running():
     if not shutil.which("colima"):
         return False
     p = subprocess.run(["colima", "status"], capture_output=True, text=True)
-    return p.returncode == 0 and "running" in (p.stdout + p.stderr).lower()
+    out = (p.stdout + p.stderr).lower()
+    # "colima is not running" contains "running", so the absence of the
+    # "not" has to be checked explicitly.
+    if "not running" in out or "is not running" in out:
+        return False
+    return p.returncode == 0 and "is running" in out
 
 
 def backend():
