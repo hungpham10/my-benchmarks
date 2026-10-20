@@ -426,7 +426,9 @@ def render_fs_readshapes(disk_files):
     cold = _fs_legs(disk_files, "readshapes-cold")
     if not warm:
         return ""
-    shapes = list(next(iter(warm.values())).keys())
+    meta_keys = ("module", "fs", "run_id", "cache_dropped")
+    shapes = [k for k, v in next(iter(warm.values())).items()
+              if k not in meta_keys and isinstance(v, dict)]
     out = ["## Filesystem Matrix — Read Shapes"]
     out.append("| Shape | " + " | ".join(
         f"{fs} warm / cold ms" for fs in sorted(warm)) + " |")
