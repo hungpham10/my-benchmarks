@@ -69,3 +69,12 @@ queries:
   postgres/jsonb:
     query: q1_counter_rate
     table: metrics_jsonb
+
+# The longest scenario: four legs, each with a bulk load, a query sweep, a
+# load phase and a cold-cache phase. It also needs the filesystem tooling
+# on the runner, and its results are the evidence behind a published
+# chapter, so they are kept longer.
+ci:
+  job_timeout_minutes: 120
+  artifact_days: 180
+  fs_tools: true

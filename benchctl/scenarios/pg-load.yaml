@@ -38,3 +38,8 @@ queries:
   postgres/norm:
     query: q1_counter_rate
     table: metrics_norm_brin
+
+# Three systems, one ramp: the job needs longer than a single-system run.
+ci:
+  job_timeout_minutes: 90
+  artifact_days: 90

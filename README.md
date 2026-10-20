@@ -35,15 +35,17 @@ catalogue:
 | `scenarios/pg-load.yaml` | Prometheus and PostgreSQL side by side under the same ramp |
 | `scenarios/fs.yaml` | One database on ext4, XFS, btrfs and ZFS |
 
-There is also a workflow per scenario: <kbd>Actions</kbd> → *prom-load* /
-*pg-load* / *fs* → *Run workflow*. Each one has its own budget, its own
-concurrency group and its own artifact retention, and each calls the same
-pipeline, [benchmark.yml](.github/workflows/benchmark.yml), so the steps
-exist exactly once. `prom-load` takes about twenty minutes, `pg-load` about
-thirty, `fs` runs the filesystem matrix — four filesystems, one database —
-in about an hour. Nothing runs on a schedule and nothing runs on a pull
-request; a benchmark that runs by itself spends the runner's minutes on a
-result nobody asked for.
+There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
+It runs as a matrix — one runner per scenario — and the matrix is built by
+reading `benchctl/scenarios/*.yaml`, so the scenario files are the only
+place a benchmark is declared. Each scenario's `ci` block says how long its
+job may run, how long its results are kept, and whether the runner needs
+the filesystem tooling. Run them all, or one: the *scenario* input takes a
+name, and an empty value means all of them. `prom-load` takes about twenty
+minutes, `pg-load` about thirty, `fs` runs the filesystem matrix — four
+filesystems, one database — in about an hour. Nothing runs on a schedule
+and nothing runs on a pull request; a benchmark that runs by itself spends
+the runner's minutes on a result nobody asked for.
 
 The harness also ships an optional monitoring stack: cAdvisor, a host exporter
 and both databases' own metrics feed a Grafana dashboard, so a run can be judged

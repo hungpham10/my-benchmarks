@@ -1,59 +1,105 @@
 # The benchctl pipeline.
 #
-# This file is the pipeline; the scenario files are the entry points. Each
-# scenario has its own workflow next to this one (prom-load.yml, pg-load.yml,
-# fs.yml) and calls this file with `uses:`. That split is what makes the
-# scenarios independent:
+# One workflow, one matrix, one runner per scenario. The matrix is not
+# written by hand: a prepare job reads benchctl/scenarios/*.yaml and builds
+# it, so the scenario files are the only place a benchmark is declared. Add
+# a yaml there and it gets a runner, a timeout and an artifact of its own.
 #
-#   - each one has its own timeout, its own concurrency group and its own
-#     artifact retention, so a filesystem run cannot eat the budget of a
-#     Prometheus run
-#   - a scenario that needs the filesystem tooling asks for it, instead of
-#     every run installing packages it does not use
-#   - adding a benchmark is one new workflow file and one new yaml under
-#     benchctl/scenarios/ — the pipeline below does not change
+# Each matrix leg is a separate job on a separate runner, so the scenarios
+# do not share a budget: the filesystem matrix can take an hour without
+# touching the Prometheus run's clock. fail-fast is off for the same
+# reason — one scenario failing should not cancel the others.
 #
-# The pipeline body lives here exactly once. A step that exists in two
-# copies is a step that exists in one version.
+# The scenario's own yaml says how long it may run (timeout_min) and what
+# it needs from the runner (the ci block).
 
 name: benchmark
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       scenario:
-        description: Scenario file under benchctl/scenarios/, without .yaml
-        required: true
+        description: Run only this scenario (empty = all of them)
         type: string
+        default: ''
       publish:
         description: Open a PR with the results
-        required: false
-        default: false
         type: boolean
-      timeout_minutes:
-        description: How long the job may run
-        required: false
-        default: 60
-        type: number
-      artifact_days:
-        description: How long the results artifact is kept
-        required: false
-        default: 90
-        type: number
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  bench:
+  prepare:
+    # Reads the scenario files and turns them into the matrix. Cheap, and it
+    # fails here rather than four minutes into a run.
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: 5
+
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Build the matrix
+        id: build
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob
+          import json
+          import os
+
+          import yaml
+
+          entries = []
+          for path in sorted(glob.glob("benchctl/scenarios/*.yaml")):
+              with open(path) as f:
+                  s = yaml.safe_load(f)
+              if not s or "id" not in s:
+                  continue
+              ci = s.get("ci") or {}
+              entries.append({
+                  "scenario": s["id"],
+                  # The job's budget, from the scenario's own ci block.
+                  # timeout_min above is the load phase's budget, not the
+                  # job's: one scenario may run three systems.
+                  "timeout_minutes": int(ci.get("job_timeout_minutes") or 60),
+                  "artifact_days": int(ci.get("artifact_days") or 90),
+                  # Filesystem scenarios need loop devices and mkfs tools.
+                  "fs_tools": bool(ci.get("fs_tools")),
+              })
+
+          if not entries:
+              raise SystemExit("no scenarios found in benchctl/scenarios/")
+          print(f"matrix={json.dumps(entries)}")
+          for e in entries:
+              print(f"  {e['scenario']}: timeout={e['timeout_minutes']}min, "
+                    f"artifact={e['artifact_days']}d, fs_tools={e['fs_tools']}")
+          PY
+
+  bench:
+    needs: prepare
+    # An empty input means "run them all".
+    if: ${{ inputs.scenario == '' || inputs.scenario == matrix.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     # One run of the same scenario at a time. Two concurrent benches would
-    # measure each other. Different scenarios may run at the same time:
-    # they are different measurements.
+    # measure each other. Different scenarios run at the same time: they are
+    # different measurements.
     concurrency:
-      group: benchmark-${{ inputs.scenario }}
+      group: benchmark-${{ matrix.scenario }}
       cancel-in-progress: false
 
     permissions:
@@ -61,8 +107,9 @@ jobs:
       pull-requests: write
 
     env:
-      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}
+      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}-${{ matrix.scenario }}
       BENCH_COMMIT: ${{ github.sha }}
+      SCENARIO: scenarios/${{ matrix.scenario }}.yaml
 
     steps:
       - name: Clean workspace
@@ -89,18 +136,16 @@ jobs:
           free -g | head -2
           df -h "$RUNNER_TEMP" | tail -1
 
-      - name: Select scenario
-        # The scenario is a file in benchctl/scenarios/. Fail loudly when it
-        # is missing: a scenario that silently does not exist would run
-        # whatever is on disk.
+      - name: Check the scenario file
+        # The matrix came from these files, but the job runs on a fresh
+        # checkout of the same commit, so the check is cheap insurance
+        # against a scenario that was renamed between the two.
         run: |
-          SCENARIO="scenarios/${{ inputs.scenario }}.yaml"
           if [ ! -f "benchctl/$SCENARIO" ]; then
             echo "::error::no such scenario file: benchctl/$SCENARIO"
             ls benchctl/scenarios/ || true
             exit 1
           fi
-          echo "SCENARIO=$SCENARIO" >> "$GITHUB_ENV"
           echo "running $SCENARIO"
 
       - name: Install driver deps
@@ -111,7 +156,7 @@ jobs:
         run: pip install numpy cramjam pyyaml 'psycopg[binary]'
 
       - name: Install filesystem tools
-        # Only the filesystem scenario formats real filesystems on the
+        # Only a filesystem scenario formats real filesystems on the
         # runner's loop devices, so only it needs the tools that do it:
         # xfsprogs and btrfs-progs are not preinstalled, and ZFS needs its
         # kernel module, which on the runner's kernel comes from
@@ -121,7 +166,7 @@ jobs:
         # The extra-modules package is best effort: it does not exist for
         # every kernel a runner might boot, and a missing ZFS module is
         # recorded as a gap in the results, not as a failed run.
-        if: inputs.scenario == 'fs'
+        if: matrix.fs_tools
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -171,7 +216,7 @@ jobs:
         # run died mid-leg, the mount and the loop device are still there.
         # Only detach ours: `losetup -D` would take every loop device on
         # the runner with it.
-        if: always() && inputs.scenario == 'fs'
+        if: always() && matrix.fs_tools
         run: |
           sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
           for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
@@ -183,16 +228,16 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ inputs.scenario }}-${{ github.run_number }}
+          name: results-${{ matrix.scenario }}-${{ github.run_number }}
           path: benchctl/results/
           if-no-files-found: error
-          retention-days: ${{ inputs.artifact_days }}
+          retention-days: ${{ matrix.artifact_days }}
 
       - name: Summarise
         if: always()
         working-directory: benchctl
         run: |
-          echo "### benchctl summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "### benchctl summary (${{ matrix.scenario }})" >> "$GITHUB_STEP_SUMMARY"
           for f in results/disk-*.json results/verify.json; do
             if [ -f "$f" ]; then
               echo "#### $f" >> "$GITHUB_STEP_SUMMARY"
@@ -209,12 +254,13 @@ jobs:
 
       # Opens a PR rather than pushing to main. Results are evidence, so a run
       # landing on main should be a diff somebody can read rather than a push.
+      # One PR per scenario: each leg has its own results directory.
       - name: Open a PR with the results
         if: inputs.publish
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = `bench/run-${{ github.run_number }}-${{ inputs.scenario }}`;
+            const branch = `bench/run-${{ github.run_number }}-${{ matrix.scenario }}`;
             const cwd = process.env.GITHUB_WORKSPACE;
             const { execSync } = require('child_process');
 
@@ -234,7 +280,7 @@ jobs:
               return;
             }
 
-            const scenario = '${{ inputs.scenario }}';
+            const scenario = '${{ matrix.scenario }}';
             run(`git commit -m "bench: results from run ${{ github.run_number }} (${scenario})"`);
             run(`git push --force origin ${branch}`);
 

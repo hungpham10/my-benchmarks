@@ -33,3 +33,9 @@ dataset:
   ahead_minutes: 8
   seed: 20240101
   query: 'sum(rate(http_requests_total[5m]))'
+
+# What CI needs to run this scenario: the job's budget, how long the
+# results are kept, and whether the runner needs the filesystem tooling.
+ci:
+  job_timeout_minutes: 60
+  artifact_days: 90
