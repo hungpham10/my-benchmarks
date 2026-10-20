@@ -44,11 +44,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL 18
+      - name: Install PostgreSQL 18 (PGDG repo)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-18 postgresql-contrib-18 \
-              xfsprogs btrfs-progs zfsutils-linux fio python3-psycopg2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl ca-certificates gnupg postgresql-common
+          # add official PostgreSQL apt repo (PG 18 is not in ubuntu 24.04 base)
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-18 postgresql-contrib-18 \
+              xfsprogs btrfs-progs zfsutils-linux fio \
+              libpq-dev python3-psycopg2
+          /usr/lib/postgresql/18/bin/postgres --version
 
       - name: Prepare data mount (${{ matrix.fs }})
         run: |
