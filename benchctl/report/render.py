@@ -509,7 +509,11 @@ def main():
     if resources:
         lines.append(render_resource(resources))
 
-    query_files = [f for f in os.listdir(RESULTS) if f.startswith("queries-")]
+    # queries-cold-<slug>.json is the same suite after the cache was
+    # dropped; it has its own table in the filesystem section and must not
+    # be mixed into the warm one.
+    query_files = [f for f in os.listdir(RESULTS)
+                   if f.startswith("queries-") and not f.startswith("queries-cold-")]
     if query_files:
         lines.append(render_queries(query_files))
 
