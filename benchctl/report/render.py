@@ -147,8 +147,21 @@ def _leg_sort_key(label):
     return (label.split(" on ")[0], tuple(int(n) for n in nums), label)
 
 
-def render_sharding(query_files):
-    """The sharding curve: one query, N shards, one instance."""
+def render_sharding(query_files, shape_files=None):
+    """The sharding curve: one scan over N shards, one instance.
+
+    The scan is the shape that answers the question — a query that reads
+    every shard. The plan is in the table next to the timing, because
+    "Parallel Append, three workers" and "a serial scan" are different
+    measurements even when they take the same time.
+    """
+    shapes = {}
+    for f in sorted(shape_files or []):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        extra = d.get("extra") or ""
+        if extra.startswith("shards"):
+            shapes[extra] = d
+
     rows = []
     for f in sorted(query_files):
         d = json.load(open(os.path.join(RESULTS, f)))
@@ -160,33 +173,37 @@ def render_sharding(query_files):
         except ValueError:
             continue
         q1 = d.get("q1_counter_rate", {})
-        plan = q1.get("plan") or {}
-        rows.append((n, q1.get("p50_ms"), q1.get("p95_ms"), q1.get("n"),
-                     plan.get("workers_launched"),
+        scan = (shapes.get(extra) or {}).get("seq_scan", {})
+        plan = scan.get("plan") or q1.get("plan") or {}
+        rows.append((n, scan.get("p50_ms"), scan.get("max_ms"),
+                     q1.get("p50_ms"), plan.get("workers_launched"),
+                     plan.get("workers_planned"),
                      "Parallel Append" in (plan.get("nodes") or [])))
     if not rows:
         return ""
     rows.sort()
     base = rows[0][1]
-    out = ["## Sharding — One Query Over N Shards"]
-    out.append("| Shards | q1 p50 ms | q1 p95 ms | speedup | efficiency | "
-               "workers | parallel append |")
-    out.append("|--------|-----------|-----------|---------|------------|"
-               "---------|----------------|")
-    for n, p50, p95, iters, workers, parallel in rows:
+    out = ["## Sharding — One Scan Over N Shards"]
+    out.append("| Shards | scan p50 ms | scan max ms | counter-rate p50 ms | "
+               "speedup | efficiency | workers | parallel append |")
+    out.append("|--------|-------------|-------------|-------------------|"
+               "---------|------------|---------|----------------|")
+    for n, p50, pmax, q1_p50, launched, planned, parallel in rows:
         speedup = ""
         eff = ""
         if base and p50:
             speedup = f"{base / p50:.2f}x"
             eff = f"{base / p50 / n:.0%}"
         out.append(f"| {n} | {p50 if p50 is not None else 'n/a'} | "
-                   f"{p95 if p95 is not None else 'n/a'} | {speedup} | {eff} | "
-                   f"{workers if workers is not None else 'n/a'} | "
+                   f"{pmax if pmax is not None else 'n/a'} | "
+                   f"{q1_p50 if q1_p50 is not None else 'n/a'} | {speedup} | "
+                   f"{eff} | {launched if launched is not None else 'n/a'} | "
                    f"{'yes' if parallel else 'no'} |")
     out.append("")
-    out.append("Speedup is against one shard; efficiency is the speedup "
+    out.append("speedup is against one shard; efficiency is the speedup "
                "divided by the number of shards, so 100% means the extra "
-               "shards bought exactly what they should.")
+               "shards bought exactly what they should. workers is how many "
+               "parallel workers the plan actually launched.")
     out.append("")
     return "\n".join(out)
 
@@ -591,7 +608,9 @@ def main():
                    if f.startswith("queries-") and not f.startswith("queries-cold-")]
     if query_files:
         lines.append(render_queries(query_files))
-        sharding = render_sharding(query_files)
+        shape_files = [f for f in os.listdir(RESULTS)
+                       if f.startswith("readshapes-")]
+        sharding = render_sharding(query_files, shape_files)
         if sharding:
             lines.append(sharding)
 

@@ -93,8 +93,8 @@ def sample_stats(variant=None):
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
 
-    if variant == "norm":
-        table = "metrics_norm_brin"
+    if variant in ("norm", "sharded"):
+        table = "metrics_norm_brin" if variant == "norm" else "metrics_sharded"
         # Count all rows
         cur.execute(f"SELECT count(*) FROM {table}")
         count = int(cur.fetchone()[0] or 0)
@@ -340,7 +340,50 @@ def _plan_summary(plan):
         "nodes": nodes,
         "workers_planned": workers_planned,
         "workers_launched": workers_launched,
+        "parallel_append": "Parallel Append" in nodes,
     }
+
+
+def _explain(conn, sql):
+    """EXPLAIN ANALYZE the query and summarise the plan.
+
+    ANALYZE, not plain EXPLAIN: the number of workers that actually
+    launched only exists in an executed plan. Without it, "Workers
+    Launched" is missing and every plan looks like it ran on one core.
+    """
+    cur = conn.cursor()
+    cur.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + sql)
+    plan = cur.fetchone()[0][0]["Plan"]
+    cur.close()
+    return _plan_summary(plan)
+
+
+def _setup_parallel(conn):
+    """Turn on parallel workers for this session, if the scenario asks.
+
+    The module runs with max_parallel_workers_per_gather=0 so that a
+    filesystem comparison is not measured through a scheduler lottery; the
+    sharding scenario is the opposite case and needs the workers, so it
+    asks for them.
+
+    The costs are zeroed too. PostgreSQL's planner will not choose a
+    parallel plan for a query with a window function and a join on its
+    own, and "the planner did not pick it" is a different experiment from
+    "how well does it scale when it does".
+    """
+    workers = os.environ.get("BENCHCTL_PARALLEL_WORKERS", "").strip()
+    if not workers:
+        return ""
+    n = max(1, int(workers))
+    cur = conn.cursor()
+    cur.execute(f"SET max_parallel_workers_per_gather = {n}")
+    cur.execute(f"SET max_parallel_workers = {max(n, 8)}")
+    cur.execute("SET min_parallel_table_scan_size = 0")
+    cur.execute("SET min_parallel_index_scan_size = 0")
+    cur.execute("SET parallel_setup_cost = 0")
+    cur.execute("SET parallel_tuple_cost = 0")
+    cur.close()
+    return str(n)
 
 
 def readshapes(variant=None):
@@ -372,6 +415,7 @@ def readshapes(variant=None):
     conn = psycopg.connect(dsn, autocommit=True)
     out = {}
     try:
+        _setup_parallel(conn)
         _, t_start_ms, t_end_ms = _read_dataset()
         for name, sql in READ_SHAPES[variant].items():
             text = render_sql(sql, t_start_ms, t_end_ms)
@@ -391,7 +435,7 @@ def readshapes(variant=None):
                 rows = len(res)
                 cur.close()
             times.sort()
-            out[name] = {
+            entry = {
                 "n": len(times),
                 "cold": cold,
                 "rows": rows,
@@ -399,6 +443,14 @@ def readshapes(variant=None):
                 "min_ms": round(times[0], 2),
                 "max_ms": round(times[-1], 2),
             }
+            # The plan of the full-table scan: this is the shape that says
+            # whether the shards were read in parallel or one after another.
+            if name == "seq_scan" and os.environ.get("BENCHCTL_PARALLEL_WORKERS"):
+                try:
+                    entry["plan"] = _explain(conn, text)
+                except Exception as e:  # noqa: BLE001 — diagnostic, never fatal
+                    entry["plan_error"] = str(e)
+            out[name] = entry
     finally:
         conn.close()
     print(json.dumps(out))
@@ -441,27 +493,7 @@ def qbench(variant=None):
             cur.close()
             return n
 
-        # Parallel workers, if the scenario asks for them. The module runs
-        # with max_parallel_workers_per_gather=0 so that a filesystem
-        # comparison is not measured through a scheduler lottery; the
-        # sharding scenario is the opposite case and needs the workers, so
-        # it asks for them per session.
-        #
-        # The costs are zeroed too. PostgreSQL's planner will not choose a
-        # parallel plan for a query with a window function and a join on
-        # its own, and "the planner did not pick it" is a different
-        # experiment from "how well does it scale when it does".
-        workers = os.environ.get("BENCHCTL_PARALLEL_WORKERS", "").strip()
-        if workers:
-            n = max(1, int(workers))
-            cur = conn.cursor()
-            cur.execute(f"SET max_parallel_workers_per_gather = {n}")
-            cur.execute(f"SET max_parallel_workers = {max(n, 8)}")
-            cur.execute("SET min_parallel_table_scan_size = 0")
-            cur.execute("SET min_parallel_index_scan_size = 0")
-            cur.execute("SET parallel_setup_cost = 0")
-            cur.execute("SET parallel_tuple_cost = 0")
-            cur.close()
+        workers = _setup_parallel(conn)
 
         results = run_all(exec_fn, t_start_ms, t_end_ms, backend,
                           measure=int(os.environ.get("QBENCH_MEASURE", "30")),
@@ -476,11 +508,7 @@ def qbench(variant=None):
             q1 = next((q for q in Q.QUERIES if q["name"] == "q1_counter_rate"), None)
             if q1:
                 sql = render_sql(q1["sql"][backend], t_start_ms, t_end_ms)
-                cur = conn.cursor()
-                cur.execute("EXPLAIN (FORMAT JSON) " + sql)
-                plan = cur.fetchone()[0][0]["Plan"]
-                cur.close()
-                results["q1_counter_rate"]["plan"] = _plan_summary(plan)
+                results["q1_counter_rate"]["plan"] = _explain(conn, sql)
     finally:
         conn.close()
     print(json.dumps(results))
