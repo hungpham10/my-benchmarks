@@ -529,6 +529,12 @@ def main():
         yaml.safe_dump(compose, buf, default_flow_style=False)
         open(os.path.join(ROOT, "docker-compose.gen.yml"), "w").write(buf.getvalue())
 
+        # Bring the SUT up from nothing. A container that survived from a
+        # previous leg keeps its bind mount — the path string is the same,
+        # so compose sees no change and reuses it, data and all. Tearing
+        # the container down first makes every leg hermetic.
+        sh("docker", "compose", "-f", "docker-compose.gen.yml",
+           "down", "-v", check=False)
         sh("docker", "compose", "-f", "docker-compose.gen.yml",
            "up", "-d", "--wait", "--wait-timeout", "180", "sut")
         # Port env vars default from module.yaml before expand(): expand()

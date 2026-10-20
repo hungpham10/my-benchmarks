@@ -261,6 +261,15 @@ def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
 
     host_sh(f"mkdir -p {root}/fs {root}/mnt")
 
+    # A crashed run can leave a mount and a loop device behind. Mounting on
+    # top of a stale mount would hide it but leave it alive, and the data
+    # directory under it would still be the old filesystem's — which is how
+    # a leg ends up loading into a database that is already full.
+    host_sh(f"umount {mount} 2>/dev/null || true")
+    for dev in host_out(
+            f"losetup -a 2>/dev/null | grep ' {image}:' | cut -d: -f1").split():
+        host_sh(f"losetup -d {dev} 2>/dev/null || true")
+
     # A fresh sparse file per leg. Sparse so the image costs nothing until
     # the filesystem writes to it.
     host_sh(f"rm -f {image}")
