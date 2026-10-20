@@ -1,0 +1,151 @@
+name: pg-shard-fs-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Rows to seed"
+        default: "5000000"   # GH default small; bump to 50000000 per plan
+      phases_sec:
+        description: "load,hybrid,read seconds"
+        default: "60,60,30"
+      shards:
+        description: "N shards"
+        default: "32"
+
+jobs:
+  bench:
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- layout x FS (index I1) ----
+          - { layout: A, index: I1, fs: ext4 }
+          - { layout: B, index: I1, fs: ext4 }
+          - { layout: C, index: I1, fs: ext4 }
+          - { layout: E, index: I1, fs: ext4 }
+          - { layout: F, index: I1, fs: ext4 }
+          - { layout: B, index: I1, fs: xfs }
+          - { layout: B, index: I1, fs: btrfs }
+          - { layout: B, index: I1, fs: zfs }
+          # ---- JSONB index variants on the 2主力 FS ----
+          - { layout: D, index: I3, fs: ext4 }
+          - { layout: D, index: I4, fs: ext4 }
+          - { layout: D, index: I5, fs: ext4 }
+          # ---- tmpfs upper-bound (zero IO) ----
+          - { layout: B, index: I1, fs: tmpfs }
+      max-parallel: 4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-contrib-18 \
+              xfsprogs btrfs-progs zfsutils-linux fio python3-psycopg2
+
+      - name: Prepare data mount (${{ matrix.fs }})
+        run: |
+          DATACFG="${{ matrix.fs }}"
+          sudo mkdir -p /mnt/pgdata /mnt/pgwal
+
+          if [ "$DATACFG" = tmpfs ]; then
+            sudo mount -t tmpfs -o size=12g tmpfs /mnt/pgdata
+            sudo mount -t tmpfs -o size=4g tmpfs /mnt/pgwal
+            echo "FS_LABEL=tmpfs" >> "$GITHUB_ENV"
+          else
+            sudo fallocate -l 20G /opt/data.img
+            sudo fallocate -l 6G  /opt/wal.img
+            sudo losetup -f /opt/data.img
+            sudo losetup -f /opt/wal.img
+            DA=$(sudo losetup -j /opt/data.img | cut -d: -f1)
+            DW=$(sudo losetup -j /opt/wal.img | cut -d: -f1)
+            case "$DATACFG" in
+              ext4)
+                sudo mkfs.ext4 -q -F $DA; sudo mkfs.ext4 -q -F $DW ;;
+              xfs)
+                sudo mkfs.xfs -qf $DA; sudo mkfs.xfs -qf $DW ;;
+              btrfs)
+                sudo mkfs.btrfs -qf $DA; sudo mkfs.btrfs -qf $DW ;;
+              zfs)
+                sudo modprobe zfs || true
+                sudo zpool create pgdata $DA
+                sudo zpool create pgwal  $DW
+                # fair-compare knobs vs ext4/xfs:
+                sudo zfs set primarycache=metadata pgdata
+                sudo zfs set recordsize=8192   pgdata   # match PG page
+                ;;
+            esac
+
+            if [ "$DATACFG" != zfs ]; then
+              sudo mount $DA /mnt/pgdata
+              sudo mount $DW /mnt/pgwal
+            else
+              sudo zfs set mountpoint=/mnt/pgdata pgdata
+              sudo zfs set mountpoint=/mnt/pgwal  pgwal
+            fi
+            echo "FS_LABEL=$DATACFG-loop" >> "$GITHUB_ENV"
+          fi
+          sudo chown -R $(whoami) /mnt/pgdata /mnt/pgwal 2>/dev/null || true
+          df -h /mnt/pgdata /mnt/pgwal || true
+
+          # ZFS ARC cap to keep fair vs shared_buffers=512MB
+          if [ "$DATACFG" = zfs ]; then
+            echo 536870912 | sudo tee /sys/module/zfs/parameters/zfs_arc_max
+          fi
+
+      - name: Baseline (pg_test_fsync + pg_test_timing)
+        run: |
+          PG18BIN=/usr/lib/postgresql/18/bin
+          $PG18BIN/pg_test_fsync > baseline_fsync.txt || true
+          $PG18BIN/pg_test_timing > baseline_timing.txt || true
+          cat baseline_fsync.txt
+
+      - name: Start PostgreSQL
+        id: pg
+        run: |
+          chmod +x bench/pg-shard-fs/setup-pg.sh
+          IO=sync
+          if [ "${{ matrix.fs }}" = xfs ] || [ "${{ matrix.fs }}" = ext4 ]; then
+            IO=worker    # PG18 async IO via workers (io_uring needs kernel 6.x check)
+          fi
+          OUT=$(bash bench/pg-shard-fs/setup-pg.sh /mnt/pgdata /mnt/pgwal 5433 $IO)
+          echo "$OUT"
+          DSN=$(echo "$OUT" | grep '^DSN=' | cut -d= -f2-)
+          echo "DSN=$DSN" >> "$GITHUB_ENV"
+
+      - name: Benchmark ${{ matrix.layout }}/${{ matrix.index }}/${{ matrix.fs }}
+        run: |
+          IFS=',' read L H R <<< "${{ inputs.phases_sec || '60,60,30' }}"
+          cd bench/pg-shard-fs
+          python3 harness.py \
+            --dsn "$DSN" \
+            --layout ${{ matrix.layout }} \
+            --index ${{ matrix.index }} \
+            --shards ${{ inputs.shards || '32' }} \
+            --rows ${{ inputs.rows || '5000000' }} \
+            --workers 6 \
+            --load-sec $L --hybrid-sec $H --read-sec $R
+
+      - name: Cleanup
+        if: always()
+        run: |
+          /usr/lib/postgresql/18/bin/pg_ctl -D /mnt/pgdata stop || true
+          sudo zpool destroy pgdata 2>/dev/null || true
+          sudo zpool destroy pgwal  2>/dev/null || true
+          sudo umount /mnt/pgdata /mnt/pgwal 2>/dev/null || true
+          sudo losetup -D 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.fs }}-${{ matrix.layout }}-${{ matrix.index }}
+          path: |
+            bench/pg-shard-fs/out/*.jsonl
+            bench/pg-shard-fs/out/iostat.log
+            baseline_fsync.txt
+            baseline_timing.txt
