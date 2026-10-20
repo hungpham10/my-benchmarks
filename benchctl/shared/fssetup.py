@@ -565,9 +565,18 @@ def fsync_bench_fio(mount_dir, seconds=5, size_mb=64):
     try:
         data = _json.loads(p.stdout)
         job = data["jobs"][0]
-        lat = job["write"]["lat_ns"]["percentile"]
+        write = job["write"]
+        # With --fdatasync the flush is a separate operation, so its
+        # latency lives in the "sync" section. The write itself is
+        # buffered and fast, which is exactly the point: the cost of a
+        # commit is the sync, not the write.
+        sync = job.get("sync", {})
+        lat = sync.get("lat_ns", {}).get("percentile") or \
+            write.get("clat_ns", {}).get("percentile") or {}
         p50 = float(lat["50.000000"]) / 1000.0
         p99 = float(lat["99.000000"]) / 1000.0
+        runtime = job.get("job_runtime") or seconds
+        syncs = sync.get("total_ios") or write.get("total_ios")
         return {
             "available": True,
             "tool": "fio",
@@ -577,8 +586,10 @@ def fsync_bench_fio(mount_dir, seconds=5, size_mb=64):
             "fdatasync": 1,
             "fdatasync_us_p50": round(p50, 1),
             "fdatasync_us_p99": round(p99, 1),
-            "iops": job["write"]["iops"],
-            "write_bytes": job["write"]["bytes"],
+            "fdatasync_us_mean": round(sync.get("lat_ns", {}).get("mean", 0) / 1000.0, 1),
+            "fsyncs": syncs,
+            "fsyncs_per_s": round(syncs / runtime, 1) if syncs and runtime else None,
+            "write_bytes": write.get("io_bytes"),
         }
     except (KeyError, ValueError, IndexError) as e:
         return {"available": False, "reason": f"unparseable fio output: {e}"}
