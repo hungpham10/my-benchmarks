@@ -624,9 +624,13 @@ def main():
             io_write = collect_io(module, init_env)
 
             # fsync latency, measured by PostgreSQL's own fsync benchmark on
-            # the data directory itself.
+            # the data directory itself, plus a host-side fio fallback for
+            # the filesystems where pg_test_fsync cannot run (ZFS refuses
+            # 8 KiB O_DIRECT writes).
             print("[benchctl] fsync latency (pg_test_fsync)", flush=True)
             fsync = fsync_bench(mod_cfg["deploy"]["disk_path"])
+            fio = fssetup.fsync_bench_fio(fs_state["mount"])
+            fsync["fio"] = fio
             json.dump({"module": system, "fs": fs_type, "run_id": run_id, **fsync},
                       open(os.path.join(RESULTS, f"fsync-{slug}.json"), "w"), indent=1)
             if fsync.get("available"):
@@ -635,6 +639,12 @@ def main():
             else:
                 print(f"[benchctl] fsync benchmark unavailable: "
                       f"{fsync.get('error')}", flush=True)
+            if fio.get("available"):
+                print(f"[benchctl] fsync (fio): p50 {fio['fdatasync_us_p50']} us, "
+                      f"p99 {fio['fdatasync_us_p99']} us", flush=True)
+            else:
+                print(f"[benchctl] fio fsync benchmark unavailable: "
+                      f"{fio.get('reason')}", flush=True)
 
         print("[benchctl] query sweep q1-q5", flush=True)
         qbench_env = {**init_env}

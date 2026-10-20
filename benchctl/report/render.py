@@ -320,32 +320,62 @@ def render_fs_write(disk_files, fsync_files, io_files):
     fsyncs = _fs_legs(disk_files, "fsync")
     ios = _fs_legs(disk_files, "io")
     out = ["## Filesystem Matrix — Write Path"]
-    out.append("| Filesystem | fdatasync µs | fsync µs | COPY s | samples/s | on disk | PG write µs/op | writeback µs/op |")
-    out.append("|------------|---------------|----------|--------|-----------|---------|-----------------|------------------|")
+    out.append("| Filesystem | fdatasync µs | fsync µs | fio p50 µs | fio p99 µs | COPY s | samples/s | on disk |")
+    out.append("|------------|---------------|----------|-----------|-----------|--------|-----------|---------|")
     for f in sorted(disk_files):
         d = json.load(open(os.path.join(RESULTS, f)))
         fs = d.get("fs")
         if not fs:
             continue
         fsb = fsyncs.get(fs, {})
-        io = ios.get(fs, {}).get("after_write", {})
+        fio = fsb.get("fio", {})
         copy_s = d.get("seconds")
         sps = d.get("samples_per_second")
         out.append(
             f"| {fs} | {fsb.get('fdatasync_us', 'n/a')} | "
             f"{fsb.get('fsync_us', 'n/a')} | "
+            f"{fio.get('fdatasync_us_p50', 'n/a')} | "
+            f"{fio.get('fdatasync_us_p99', 'n/a')} | "
             f"{copy_s if copy_s is not None else 'n/a'} | "
             f"{f'{sps:,.0f}' if sps else 'n/a'} | "
-            f"{fmt_bytes(d.get('bytes_on_disk', 0))} | "
-            f"{io.get('write_us_avg', 'n/a')} | "
-            f"{io.get('writeback_us_avg', 'n/a')} |")
+            f"{fmt_bytes(d.get('bytes_on_disk', 0))} |")
     out.append("")
     out.append("fdatasync µs / fsync µs: pg_test_fsync on the data directory "
                "itself; fdatasync is what PostgreSQL's WAL pays on Linux. "
-               "COPY s: the bulk load, one transaction. "
-               "PG write µs/op: pg_stat_io, what PostgreSQL measured at the "
-               "syscall boundary. writeback µs/op: the checkpointer flushing "
-               "dirty pages (PG 18).")
+               "fio p50/p99 µs: the same filesystem measured with fio — 4 KiB "
+               "buffered writes, one fdatasync each, which is PostgreSQL's "
+               "default WAL path. pg_test_fsync uses O_DIRECT and cannot run "
+               "on ZFS, which refuses direct writes smaller than its 128K "
+               "record. COPY s: the bulk load, one transaction.")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_fs_syscalls(disk_files):
+    """What PostgreSQL itself measured at the syscall boundary."""
+    ios = _fs_legs(disk_files, "io")
+    out = ["## Filesystem Matrix — PostgreSQL's Own I/O Accounting (pg_stat_io)"]
+    out.append("| Filesystem | write µs/op | writeback µs/op | fsync µs/op | fsyncs | read µs/op | writeback |")
+    out.append("|------------|-------------|-----------------|-------------|--------|-------------|-----------|")
+    for f in sorted(disk_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        fs = d.get("fs")
+        if not fs:
+            continue
+        io = ios.get(fs, {})
+        w = io.get("after_write", {})
+        r = io.get("after_read", {})
+        out.append(
+            f"| {fs} | {w.get('write_us_avg', 'n/a')} | "
+            f"{w.get('writeback_us_avg', 'n/a')} | "
+            f"{w.get('fsync_us_avg', 'n/a')} | "
+            f"{w.get('fsyncs', 'n/a')} | "
+            f"{r.get('read_us_avg', 'n/a')} | "
+            f"{w.get('writebacks', 'n/a')} |")
+    out.append("")
+    out.append("Average latency per syscall, as PostgreSQL measured it. "
+               "writeback is the checkpointer flushing dirty pages; fsync is "
+               "what a commit costs.")
     out.append("")
     return "\n".join(out)
 
@@ -400,6 +430,10 @@ def render_fs_caveats(fs_probes, availability=None):
                    "the envelope size. It also writes in 128K records rather "
                    "than 4K blocks, which is a real difference and not a "
                    "tuning choice.")
+    out.append("- pg_test_fsync uses O_DIRECT, and ZFS refuses direct writes "
+               "smaller than its 128K record size, so it cannot run there. "
+               "The fio column covers ZFS, and PostgreSQL's own fsync "
+               "accounting covers all four.")
     if availability:
         for fs, info in sorted(availability.items()):
             if not info.get("available"):
@@ -448,6 +482,7 @@ def main():
     if fs_probes:
         lines.append(render_fs_environment(fs_probes))
         lines.append(render_fs_write(disk_files, None, None))
+        lines.append(render_fs_syscalls(disk_files))
         lines.append(render_fs_read(disk_files, None, None, summaries))
         lines.append(render_fs_caveats(fs_probes, load("fs-availability.json") or None))
 

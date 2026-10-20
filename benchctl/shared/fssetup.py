@@ -232,6 +232,22 @@ def _has(cmd):
     return host_sh(f"command -v {cmd} >/dev/null 2>&1", check=False).returncode == 0
 
 
+def _missing_tools_message(missing):
+    """The exact command that installs what is missing."""
+    packages = {
+        "mkfs.ext4": "e2fsprogs",
+        "mkfs.xfs": "xfsprogs",
+        "mkfs.btrfs": "btrfs-progs",
+        "zpool": "zfsutils-linux",
+        "fio": "fio",
+    }
+    pkgs = sorted({packages[m] for m in missing if m in packages})
+    if not pkgs:
+        return ""
+    return ("install them with: sudo apt-get update && "
+            f"sudo apt-get install -y {' '.join(pkgs)}")
+
+
 def availability(requested=None):
     """Which of the requested filesystems can actually be provisioned here.
 
@@ -245,7 +261,8 @@ def availability(requested=None):
         if fs_type == "zfs":
             if not _has("zpool"):
                 out[fs_type] = {"available": False,
-                                 "reason": "zpool not installed (apt install zfsutils-linux)"}
+                                 "reason": "zpool is not installed — "
+                                           + _missing_tools_message(["zpool"])}
                 continue
             mod = host_sh("modprobe zfs 2>&1", check=False)
             if mod.returncode != 0:
@@ -253,7 +270,9 @@ def availability(requested=None):
                     "available": False,
                     "reason": "zfs kernel module unavailable: "
                               + (mod.stderr.strip() or mod.stdout.strip()
-                                 or "modprobe zfs failed"),
+                                 or "modprobe zfs failed")
+                              + " (on Ubuntu: sudo apt-get install -y "
+                                "linux-modules-extra-$(uname -r))",
                 }
                 continue
             out[fs_type] = {"available": True, "reason": ""}
@@ -261,9 +280,8 @@ def availability(requested=None):
         mkfs = {"ext4": "mkfs.ext4", "xfs": "mkfs.xfs", "btrfs": "mkfs.btrfs"}[fs_type]
         if not _has(mkfs):
             out[fs_type] = {"available": False,
-                             "reason": f"{mkfs} not installed "
-                                       f"(apt install {mkfs.split('.')[0]}-progs "
-                                       f"or e2fsprogs)"}
+                             "reason": f"{mkfs} is not installed — "
+                                       + _missing_tools_message([mkfs])}
             continue
         out[fs_type] = {"available": True, "reason": ""}
     return out
@@ -520,6 +538,50 @@ def probe(state):
         except Exception as e:  # noqa: BLE001
             out["zfs_error"] = str(e)
     return out
+
+
+def fsync_bench_fio(mount_dir, seconds=5, size_mb=64):
+    """fsync latency on a mounted filesystem, measured on the host.
+
+    pg_test_fsync is PostgreSQL's own benchmark, and it uses O_DIRECT when
+    the platform supports it. ZFS does not: a direct write has to be a
+    multiple of the record size, so an 8 KiB O_DIRECT write fails with
+    EINVAL and pg_test_fsync gives up ("write failed: Invalid argument").
+
+    This is the fallback, and it is also the more relevant number: buffered
+    writes with an fdatasync after each one, which is exactly what
+    PostgreSQL's default WAL path does on Linux.
+    """
+    import json as _json
+    if host_sh("command -v fio", check=False).returncode != 0:
+        return {"available": False, "reason": "fio is not installed"}
+    cmd = (
+        f"fio --name=benchctl-fsync --directory={mount_dir} "
+        f"--filename=fsync-bench.tmp --size={size_mb}M --rw=write --bs=4k "
+        f"--direct=0 --fdatasync=1 --runtime={seconds} --time_based "
+        f"--group_reporting=1 --eta=never --output-format=json"
+    )
+    p = host_sh(cmd)
+    try:
+        data = _json.loads(p.stdout)
+        job = data["jobs"][0]
+        lat = job["write"]["lat_ns"]["percentile"]
+        p50 = float(lat["50.000000"]) / 1000.0
+        p99 = float(lat["99.000000"]) / 1000.0
+        return {
+            "available": True,
+            "tool": "fio",
+            "seconds": seconds,
+            "bs": "4k",
+            "direct": 0,
+            "fdatasync": 1,
+            "fdatasync_us_p50": round(p50, 1),
+            "fdatasync_us_p99": round(p99, 1),
+            "iops": job["write"]["iops"],
+            "write_bytes": job["write"]["bytes"],
+        }
+    except (KeyError, ValueError, IndexError) as e:
+        return {"available": False, "reason": f"unparseable fio output: {e}"}
 
 
 def disk_usage(state):

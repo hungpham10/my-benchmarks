@@ -64,6 +64,30 @@ without its kernel module, for instance — is recorded as a gap in
 `results/fs-availability.json` and listed in the report, never silently
 dropped.
 
+### The host needs the tools
+
+The filesystems are formatted by the machine that runs the Docker daemon, so
+that machine needs `mkfs` and a ZFS userspace:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
+sudo modprobe zfs        # on Ubuntu: linux-modules-extra-$(uname -r)
+```
+
+With Colima, the packages go into the VM:
+
+```sh
+colima ssh -- sudo apt-get update
+colima ssh -- sudo apt-get install -y e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
+```
+
+A VM's root filesystem is small — Colima's is 19 GiB — and a full disk does
+not fail cleanly: the kernel returns EIO and the database dies with a
+signal. `shared/fssetup.py` therefore picks the mount with the most room,
+refuses to start without it, and says which disk and how much it needs.
+`colima start --disk N` only applies when the VM is created.
+
 ## What every benchmark here has in common
 
 - **Equal resource envelopes.** Whatever is under test gets the same CPU and

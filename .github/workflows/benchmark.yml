@@ -75,7 +75,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            e2fsprogs xfsprogs btrfs-progs zfsutils-linux
+            e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
           sudo modprobe loop || true
           sudo modprobe zfs || true
 
@@ -192,7 +192,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            e2fsprogs xfsprogs btrfs-progs zfsutils-linux
+            e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
           sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" \
             || echo "::warning::no linux-modules-extra for kernel $(uname -r)"
           sudo modprobe loop || true
