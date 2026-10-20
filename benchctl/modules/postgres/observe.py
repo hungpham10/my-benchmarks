@@ -258,6 +258,14 @@ READ_SHAPES = {
             SELECT count(*), sum(value) FROM metrics_jsonb
             WHERE time BETWEEN %s::timestamptz AND %s::timestamptz
               AND labels @> '{"__name__":"queue_depth","instance":"host-0000"}'""",
+        # A median over every sample of one metric. The sort cannot be
+        # optimised away, and at work_mem=8MB it spills to a temp file —
+        # which PostgreSQL puts in PGDATA, on the filesystem under test.
+        # This is the shape where the filesystem shows up in the read path.
+        "temp_sort": """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value) FROM metrics_jsonb
+            WHERE time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND labels @> '{"__name__":"queue_depth"}'""",
     },
     "norm": {
         "seq_scan": """
@@ -273,6 +281,35 @@ READ_SHAPES = {
             JOIN series_dim s ON s.id = m.series_id
             WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
               AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
+        # A median over every sample of one metric: the sort spills to a
+        # temp file in PGDATA, on the filesystem under test.
+        "temp_sort": """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY m.value)
+            FROM metrics_norm_brin m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
+    },
+    "sharded": {
+        "seq_scan": """
+            SELECT count(*), sum(m.value) FROM metrics_sharded m
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz""",
+        "one_metric": """
+            SELECT count(*), sum(m.value) FROM metrics_sharded m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
+        "one_series": """
+            SELECT count(*), sum(m.value) FROM metrics_sharded m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
+        "temp_sort": """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY m.value)
+            FROM metrics_sharded m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
     },
 }
 
@@ -352,9 +389,11 @@ def qbench(variant=None):
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
 
-    # variant is "jsonb" | "norm" from driver (split_system), but run_all()
-    # looks up shared/queries.py by backend key: "metrics_jsonb" | "metrics_norm_brin".
-    VARIANT_TO_BACKEND = {"jsonb": "metrics_jsonb", "norm": "metrics_norm_brin"}
+    # variant is "jsonb" | "norm" | "sharded" from driver (split_system),
+    # but run_all() looks up shared/queries.py by backend key.
+    VARIANT_TO_BACKEND = {"jsonb": "metrics_jsonb",
+                           "norm": "metrics_norm_brin",
+                           "sharded": "metrics_sharded"}
     if variant not in VARIANT_TO_BACKEND:
         raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb or norm)")
     backend = VARIANT_TO_BACKEND[variant]
@@ -371,6 +410,20 @@ def qbench(variant=None):
             n = len(rows)
             cur.close()
             return n
+
+        # Parallel workers, if the scenario asks for them. The module runs
+        # with max_parallel_workers_per_gather=0 so that a filesystem
+        # comparison is not measured through a scheduler lottery; the
+        # sharding scenario is the opposite case and needs the workers, so
+        # it asks for them per session.
+        workers = os.environ.get("BENCHCTL_PARALLEL_WORKERS", "").strip()
+        if workers:
+            n = max(1, int(workers))
+            cur = conn.cursor()
+            cur.execute(f"SET max_parallel_workers_per_gather = {n}")
+            cur.execute(f"SET max_parallel_workers = {max(n, 8)}")
+            cur.execute("SET min_parallel_table_scan_size = 0")
+            cur.close()
 
         results = run_all(exec_fn, t_start_ms, t_end_ms, backend,
                           measure=int(os.environ.get("QBENCH_MEASURE", "30")),

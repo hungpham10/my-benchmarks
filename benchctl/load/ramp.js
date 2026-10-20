@@ -57,8 +57,10 @@ export function handleSummary(data) {
   // being overwritten by the next leg. plan.system is like "postgres/jsonb";
   // slug it to "postgres-jsonb" for a safe filename. When the scenario has a
   // filesystem dimension, plan.fs is appended — the same rule as
-  // shared/leg.py, which is what the verifier matches against.
+  // shared/leg.py, which is what the verifier matches against. plan.extra
+  // carries whatever else the leg varies (the number of shards).
   const slug = (plan.system || 'system').replace(/\//g, '-')
-    + (plan.fs ? '-' + plan.fs : '');
+    + (plan.fs ? '-' + plan.fs : '')
+    + (plan.extra ? '-' + plan.extra : '');
   return { [`/results/summary-${slug}.json`]: JSON.stringify(data) };
 }

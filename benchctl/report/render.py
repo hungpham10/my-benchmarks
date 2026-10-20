@@ -1,6 +1,7 @@
 """report/render.py — render results/report.md from phase outputs."""
 
 import json
+import re
 import os
 import sys
 
@@ -122,9 +123,66 @@ def render_resource(resources):
 
 
 def leg_label(d):
-    """'postgres/jsonb' + 'xfs' -> 'postgres/jsonb on xfs'."""
+    """'postgres/jsonb' + 'xfs' -> 'postgres/jsonb on xfs'.
+
+    A leg that varies something else (the number of shards) says so.
+    """
     fs = d.get("fs")
-    return f"{d.get('module', 'unknown')} on {fs}" if fs else d.get("module", "unknown")
+    extra = d.get("extra") or ""
+    label = d.get("module", "unknown")
+    if fs:
+        label = f"{label} on {fs}"
+    if extra:
+        label = f"{label} ({extra})"
+    return label
+
+
+def _leg_sort_key(label):
+    """Sort legs by their numbers, not by their spelling.
+
+    'postgres/sharded (shards16)' has to come after 'shards2', and an
+    alphabetical sort puts it before.
+    """
+    nums = re.findall(r"\d+", label)
+    return (label.split(" on ")[0], tuple(int(n) for n in nums), label)
+
+
+def render_sharding(query_files):
+    """The sharding curve: one query, N shards, one instance."""
+    rows = []
+    for f in sorted(query_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        extra = d.get("extra") or ""
+        if not extra.startswith("shards"):
+            continue
+        try:
+            n = int(extra.replace("shards", ""))
+        except ValueError:
+            continue
+        q1 = d.get("q1_counter_rate", {})
+        rows.append((n, q1.get("p50_ms"), q1.get("p95_ms"), q1.get("n"),
+                     q1.get("rows_matched")))
+    if not rows:
+        return ""
+    rows.sort()
+    base = rows[0][1]
+    out = ["## Sharding — One Query Over N Shards"]
+    out.append("| Shards | q1 p50 ms | q1 p95 ms | speedup | efficiency |")
+    out.append("|--------|-----------|-----------|---------|------------|")
+    for n, p50, p95, iters, _rows in rows:
+        speedup = ""
+        eff = ""
+        if base and p50:
+            speedup = f"{base / p50:.2f}x"
+            eff = f"{base / p50 / n:.0%}"
+        out.append(f"| {n} | {p50 if p50 is not None else 'n/a'} | "
+                   f"{p95 if p95 is not None else 'n/a'} | {speedup} | {eff} |")
+    out.append("")
+    out.append("Speedup is against one shard; efficiency is the speedup "
+               "divided by the number of shards, so 100% means the extra "
+               "shards bought exactly what they should.")
+    out.append("")
+    return "\n".join(out)
 
 
 def render_queries(query_files):
@@ -157,7 +215,7 @@ def render_queries(query_files):
 
     # Build module list from actual result keys (not hardcoded wrong keys),
     # keyed to Q.LABELS display names. Unknown modules fall back to raw key.
-    mods = sorted(all_results.keys())
+    mods = sorted(all_results.keys(), key=_leg_sort_key)
     def mod_label(m):
         return Q.LABELS.get(m, m)
 
@@ -527,6 +585,9 @@ def main():
                    if f.startswith("queries-") and not f.startswith("queries-cold-")]
     if query_files:
         lines.append(render_queries(query_files))
+        sharding = render_sharding(query_files)
+        if sharding:
+            lines.append(sharding)
 
     stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
     if stats_files:

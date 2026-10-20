@@ -62,7 +62,7 @@ def _csv_rows(total, variant, t_start_ms, interval_s, window_min):
         for i in range(n_samples):
             ts_iso = datetime.fromtimestamp(timestamps[i] / 1000, tz=timezone.utc).isoformat()
             val = values[s, i]
-            if variant == "norm":
+            if variant in ("norm", "sharded"):
                 # time, series_id, value - unique series_id per series
                 sample_rows.append((ts_iso, series_id, val))
             else:
@@ -159,6 +159,21 @@ def init(ahead_minutes=8):
     # ---- connect and ensure partitions --------------------------------------
     conn = psycopg.connect(dsn, autocommit=True)
     cur = conn.cursor()
+
+    # Parallel workers. 0 by default: on one CPU a parallel plan buys
+    # nothing and costs reproducibility (the workers allocate dynamic shared
+    # memory in /dev/shm, which is 64 MB in Docker and charged to the
+    # container's memory limit). The sharding scenario asks for workers,
+    # because its whole question is how much of the machine a query can use.
+    #
+    # ALTER SYSTEM, not a command-line -c: a command-line option beats
+    # postgresql.auto.conf, so the loader could never raise it again.
+    workers = int(os.environ.get("BENCHCTL_PARALLEL_WORKERS", "0") or 0)
+    cur.execute(f"ALTER SYSTEM SET max_parallel_workers_per_gather = {workers}")
+    cur.execute(f"ALTER SYSTEM SET max_parallel_workers = {max(workers, 8)}")
+    cur.execute("SELECT pg_reload_conf()")
+    print(f"[init] max_parallel_workers_per_gather = {workers}", flush=True)
+
     if t_start_ms and t_end_ms:
         ensure_partitions(cur, t_start_ms, t_end_ms)
 
@@ -184,7 +199,31 @@ def init(ahead_minutes=8):
     # COPY expects the column order matching the table.
     # metrics_jsonb: time, labels, value
     # metrics_norm_brin: time, series_id, value
-    if variant == "norm":
+    # metrics_sharded: time, series_id, value (hash-partitioned by series)
+    if variant == "sharded":
+        cols = ["time", "series_id", "value"]
+        table = "metrics_sharded"
+        shards = int(os.environ.get("SHARDS", "1"))
+        # The partitions are what the sharding scenario varies. Hash
+        # partitioning on the series identity is what "shard by key" means
+        # inside one instance: the query touches all of them, and
+        # PostgreSQL scans them with Parallel Append.
+        cur.execute("DROP TABLE IF EXISTS metrics_sharded")
+        cur.execute(
+            "CREATE TABLE metrics_sharded ("
+            "  time      timestamptz      NOT NULL,"
+            "  series_id int             NOT NULL,"
+            "  value     double precision NOT NULL"
+            ") PARTITION BY HASH (series_id)")
+        cur.execute(
+            "CREATE INDEX metrics_sharded_series_time_idx "
+            "ON metrics_sharded (series_id, time)")
+        for i in range(shards):
+            cur.execute(
+                f"CREATE TABLE metrics_sharded_p{i} PARTITION OF metrics_sharded "
+                f"FOR VALUES WITH (MODULUS {shards}, REMAINDER {i})")
+        print(f"[init] metrics_sharded: {shards} hash partitions", flush=True)
+    elif variant == "norm":
         cols = ["time", "series_id", "value"]
         table = "metrics_norm_brin"
     else:

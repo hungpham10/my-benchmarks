@@ -1,0 +1,82 @@
+# Sharding: how many tables is it worth querying in parallel?
+#
+# The question is not "which database is faster". It is: when a workload is
+# spread over N tables and one query has to read all of them, where does
+# the curve flatten for a single instance?
+#
+# Inside PostgreSQL, "N tables" is N partitions of one table, and the query
+# is a Parallel Append over them. The number of partitions is the thing the
+# scenario varies; everything else — the dataset, the query, the envelope —
+# is held constant.
+#
+# The envelope here is wider than the rest of the repo on purpose: the
+# question has no answer on one CPU, because with one CPU the answer is
+# always "one". Four CPUs is what the runner has, and it is the smallest
+# box where the curve has a knee to find.
+#
+# The data is the same 3.6M samples as everywhere else, sharded by a hash
+# of the series identity — which is what sharding by key means inside one
+# instance.
+
+id: sharding
+systems: [postgres/sharded]
+shape: counter
+scale: medium
+
+# The dimension: the number of shards (partitions) the table is split into.
+legs:
+  - {shards: 1}
+  - {shards: 2}
+  - {shards: 4}
+  - {shards: 8}
+  - {shards: 16}
+  - {shards: 32}
+
+# A wider envelope than the rest of the repo, and the reason is written
+# down here: the question is about using more than one core. The scenario
+# that measures the filesystems keeps the 1 CPU envelope, because there the
+# comparison is between filesystems and nothing else.
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# A short ramp: this scenario is about the query's scaling, not about how
+# much load the instance can take.
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  stages:
+    - { target: 10,  duration: 30s }
+    - { target: 50,  duration: 1m }
+  graceful_ramp_down: 15s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 45
+
+env:
+  QBENCH_MEASURE: "5"
+  QBENCH_BUDGET_S: "120"
+  # Parallel workers: the point of the scenario. One per CPU.
+  BENCHCTL_PARALLEL_WORKERS: "4"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  postgres/sharded:
+    query: q1_counter_rate
+    table: metrics_sharded
+
+ci:
+  job_timeout_minutes: 90
+  artifact_days: 90

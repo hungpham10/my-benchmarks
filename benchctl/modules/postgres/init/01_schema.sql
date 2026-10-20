@@ -50,6 +50,25 @@ CREATE INDEX IF NOT EXISTS metrics_norm_brin_time_brin_idx
 CREATE INDEX IF NOT EXISTS metrics_norm_brin_series_time_idx
     ON metrics_norm_brin (series_id, time);
 
+-- Schema 3: sharded. The same rows as schema 2, but partitioned by a hash
+-- of the series identity instead of by time. This is what "sharding across
+-- N tables" looks like inside one PostgreSQL instance: N partitions, and a
+-- query that touches all of them. PostgreSQL scans them with Parallel
+-- Append, so the number of partitions decides how much of the machine the
+-- query can use.
+--
+-- The number of partitions is not in this file: it is the thing the
+-- sharding scenario varies, and the loader creates the partitions at run
+-- time.
+CREATE TABLE IF NOT EXISTS metrics_sharded (
+    time      timestamptz      NOT NULL,
+    series_id int             NOT NULL,
+    value     double precision NOT NULL
+) PARTITION BY HASH (series_id);
+
+CREATE INDEX IF NOT EXISTS metrics_sharded_series_time_idx
+    ON metrics_sharded (series_id, time);
+
 -- Helper used by the loader to create daily partitions on demand.
 CREATE OR REPLACE FUNCTION bench_ensure_partitions(
     parent regclass,

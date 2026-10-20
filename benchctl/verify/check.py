@@ -58,7 +58,13 @@ def check_parity():
         # would let the four filesystem legs overwrite each other, and the
         # parity check would compare a filesystem with itself.
         fs = stats.get("fs") or ""
+        # A leg is a (system, filesystem, extra) tuple. Keying by the system
+        # alone would let the legs overwrite each other, and the parity check
+        # would compare a leg with itself.
+        extra = stats.get("extra") or ""
         key = f"{module}@{fs}" if fs else module
+        if extra:
+            key = f"{key}#{extra}"
         count = stats["samples"]
         sum_val = stats["sum"]
 

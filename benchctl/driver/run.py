@@ -26,7 +26,7 @@ SHARED = os.path.join(ROOT, "shared")
 
 sys.path.insert(0, SHARED)
 import fssetup  # noqa: E402 — provision the filesystem under the data dir
-from leg import leg_slug  # noqa: E402 — one name for a leg, shared with k6
+from leg import leg_slug, extra_label  # noqa: E402 — one name for a leg, shared with k6
 
 COMPOSE = None
 
@@ -123,7 +123,7 @@ def render_query(system, scenario):
     raise RuntimeError("unknown query: " + spec["query"])
 
 
-def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None):
+def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None, extra=None):
     # maxVUs bounds client-side concurrency. It is a resource-envelope decision
     # (benchctl.yaml k6_max_vus), not a module's business. A module may lower it
     # via k6.max_vus. Framework passes the final value to plan.load.max_vus.
@@ -139,6 +139,8 @@ def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None):
         "scenario": scenario["id"],
         "system": system,
         "fs": fs_type or "",
+                   "extra": extra_label(extra),
+        "extra": extra_label(extra),
         "load": load,
         "thresholds": scenario["thresholds"],
         "query": render_query(system, scenario),
@@ -406,6 +408,13 @@ def main():
     os.environ["BENCHCTL_SCENARIO"] = scen_path
     scenario = yaml.safe_load(open(scen_path))
     cfg = load_cfg()
+    # A scenario may widen the envelope. The sharding scenario does: the
+    # question it asks — how many parallel table scans are worth it for one
+    # instance — has no answer on a single CPU. The override is recorded in
+    # the results, because "same envelope" is a claim the report has to be
+    # able to check.
+    if scenario.get("envelope"):
+        cfg["envelope"] = {**cfg["envelope"], **scenario["envelope"]}
     os.makedirs(RESULTS, exist_ok=True)
     run_id = cfg["run"]["run_id"]
     ds = scenario["dataset"]
@@ -483,13 +492,14 @@ def main():
                 "no filesystem could be provisioned on this host: "
                 + json.dumps(avail))
 
-    legs = [(system, fs_type)
+    legs = [(system, fs_type, extra)
             for fs_type in (filesystems or [None])
+            for extra in (scenario.get("legs") or [{}])
             for system in scenario["systems"]]
 
     fs_state = None
     current_fs = None
-    for system, fs_type in legs:
+    for system, fs_type, extra in legs:
         # Provision the filesystem when the leg changes to a new one. It is
         # torn down after its last leg, not after each leg: re-formatting
         # between systems of the same filesystem would measure the format
@@ -517,9 +527,11 @@ def main():
         mod_cfg = yaml.safe_load(
             open(os.path.join(ROOT, "modules", module, "module.yaml")))
         print(f"[benchctl] === {system}"
-              f"{' on ' + fs_type if fs_type else ''} ===", flush=True)
+              f"{' on ' + fs_type if fs_type else ''}"
+              f"{' ' + extra_label(extra) if extra_label(extra) else ''} ===",
+              flush=True)
 
-        plan = gen_plan(system, scenario, cfg, mod_cfg, fs_type)
+        plan = gen_plan(system, scenario, cfg, mod_cfg, fs_type, extra)
         json.dump(plan, open(os.path.join(ROOT, "plan.json"), "w"), indent=1)
         # The active module, as a symlink: ramp.js imports a fixed path and
         # no JS is ever generated. A symlink is not a generated file.
@@ -573,6 +585,10 @@ def main():
         # legs (a filesystem matrix) needs a shorter query sweep than one
         # with a single leg.
         init_env.update({k: str(v) for k, v in (scenario.get("env") or {}).items()})
+        # The leg's own dimension, if it has one: the sharding scenario
+        # varies the number of shards, and the module needs to know.
+        for key, value in (extra or {}).items():
+            init_env[str(key).upper()] = str(value)
         t_init = time.monotonic()
         out = subprocess.run(
             [sys.executable, f"modules/{module}/init.py"],
@@ -585,7 +601,7 @@ def main():
             raise RuntimeError("init failed")
         init_res = json.loads(out.stdout.strip().splitlines()[-1])
         disk = disk_bytes_du(mod_cfg["deploy"]["disk_path"])
-        slug = leg_slug(system, fs_type)
+        slug = leg_slug(system, fs_type, extra)
 
         # Sample stats for parity (collected while SUT is still up),
         # BEFORE writing disk so bytes_per_sample uses the real row count.
@@ -601,13 +617,15 @@ def main():
             print(out.stderr[-2000:])
             raise RuntimeError("sample stats failed")
         stats = json.loads(out.stdout.strip().splitlines()[-1])
-        json.dump({"module": system, "fs": fs_type or "", "run_id": run_id, **stats},
+        json.dump({"module": system, "fs": fs_type or "",
+                   "extra": extra_label(extra), "run_id": run_id, **stats},
                   open(os.path.join(RESULTS, f"stats-{slug}.json"), "w"), indent=1)
         print(f"[benchctl] parity stats: {stats}", flush=True)
 
         samples = stats.get("samples", init_res.get("samples", 0))
         disk_samples = samples if samples > 0 else init_res.get("samples", 1)
-        json.dump({"module": system, "fs": fs_type or "", "run_id": run_id,
+        json.dump({"module": system, "fs": fs_type or "",
+                   "extra": extra_label(extra), "run_id": run_id,
                    **init_res, **stats,
                    "init_seconds": round(init_seconds, 1),
                    "bytes_on_disk": disk,
@@ -663,7 +681,8 @@ def main():
             print(out.stderr[-3000:])
             raise RuntimeError("query bench failed")
         qres = json.loads(out.stdout.strip().splitlines()[-1])
-        json.dump({"module": system, "fs": fs_type or "", "run_id": run_id, **qres},
+        json.dump({"module": system, "fs": fs_type or "",
+                   "extra": extra_label(extra), "run_id": run_id, **qres},
                   open(os.path.join(RESULTS, f"queries-{slug}.json"), "w"), indent=1)
         print(f"[benchctl] query sweep done: {len(qres)} queries", flush=True)
 
@@ -679,7 +698,8 @@ def main():
                 print(out.stderr[-3000:])
                 raise RuntimeError("read shape bench failed")
             rshapes = json.loads(out.stdout.strip().splitlines()[-1])
-            json.dump({"module": system, "fs": fs_type or "", "run_id": run_id,
+            json.dump({"module": system, "fs": fs_type or "",
+                   "extra": extra_label(extra), "run_id": run_id,
                        **rshapes},
                       open(os.path.join(RESULTS, f"readshapes-{slug}.json"), "w"),
                       indent=1)
@@ -854,7 +874,8 @@ def main():
         if candidates:
             mem_max = max(candidates)
             mem_max_mb = round(mem_max / (1024 * 1024), 1)
-        json.dump({"module": system, "fs": fs_type or "", "run_id": run_id,
+        json.dump({"module": system, "fs": fs_type or "",
+                   "extra": extra_label(extra), "run_id": run_id,
                    "leg_seconds": round(leg_seconds, 1),
                    "cpu_core_avg": cpu_rate,
                    "mem_bytes_max": mem_max,
