@@ -307,8 +307,11 @@ def render_fs_environment(fs_probes):
                          f"compression {props.get('compression', '?')}")
         if p.get("backend"):
             notes.append(f"host backend: {p['backend']}")
+        if fs == "tmpfs":
+            notes.append("RAM, not a disk — the baseline, not a peer")
         block = p.get("block_size")
-        out.append(f"| {fs} | `{p.get('device', '?')}` | "
+        device = p.get("device") or ("RAM (no device)" if fs == "tmpfs" else "?")
+        out.append(f"| {fs} | `{device}` | "
                    f"`{p.get('mount_options', '?')}` | "
                    f"{block if block else '?'} | {', '.join(notes)} |")
     out.append("")
@@ -461,6 +464,12 @@ def render_fs_caveats(fs_probes, availability=None):
                "the runner's own disk. The comparison between filesystems is "
                "meaningful; the absolute numbers describe that disk, not a "
                "bare device.")
+    if "tmpfs" in fs_probes:
+        out.append("- **tmpfs is RAM.** It is the baseline, not a peer: it "
+                   "answers \"what does the disk cost?\" by being the same "
+                   "workload with no disk under it. Its pages are charged to "
+                   "the container's memory limit, like everything else in "
+                   "the envelope.")
     out.append("- The loop device runs with --direct-io=on, so the host page "
                "cache cannot absorb writes before they reach the disk. "
                "Without it, this would measure the host's cache.")

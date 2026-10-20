@@ -51,7 +51,7 @@ import sys
 #     metadata write on the first read of every file)
 #   - no discard (the backing file is sparse; discarding would make the
 #     reported free space a fiction)
-FS_TYPES = ("ext4", "xfs", "btrfs", "zfs")
+FS_TYPES = ("ext4", "xfs", "btrfs", "zfs", "tmpfs")
 
 MOUNT_OPTS = {
     "ext4": ["noatime"],
@@ -60,6 +60,10 @@ MOUNT_OPTS = {
     # backing file makes the reported free space a fiction.
     "btrfs": ["noatime", "nodiscard"],
     "zfs": [],          # ZFS gets atime=off on the dataset instead
+    # tmpfs is the baseline, not a peer: there is no disk under it. It is
+    # mounted with a size limit so it cannot eat the machine, and noatime
+    # like the others.
+    "tmpfs": ["noatime"],
 }
 
 DEFAULT_SIZE_GB = 12
@@ -279,6 +283,10 @@ def availability(requested=None):
     """
     out = {}
     for fs_type in (requested or FS_TYPES):
+        if fs_type == "tmpfs":
+            # tmpfs is in every kernel; there is nothing to install.
+            out[fs_type] = {"available": True, "reason": ""}
+            continue
         if fs_type == "zfs":
             if not _has("zpool"):
                 out[fs_type] = {"available": False,
@@ -396,6 +404,38 @@ def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
             f"losetup -a 2>/dev/null | grep ' {image}:' | cut -d: -f1").split():
         host_sh(f"losetup -d {dev} 2>/dev/null || true")
 
+    if fs_type == "tmpfs":
+        # The baseline: the same workload with no disk underneath it. It is
+        # RAM, so it answers a different question than the other four —
+        # "what does the disk cost?" — and the report says so.
+        #
+        # The size limit keeps it from eating the machine. The pages are
+        # charged to the container's memory limit, which is the same
+        # envelope every other leg gets.
+        host_sh(f"mkdir -p {mount}")
+        host_sh(f"mount -t tmpfs -o noatime,size={int(size_gb)}G tmpfs {mount}")
+        state = {
+            "fs": fs_type,
+            "backend": backend(),
+            "root": root,
+            "image": None,
+            "device": None,
+            "mount": mount,
+            "data_dir": data_dir,
+            "pool": None,
+            "dataset": None,
+            "opts": MOUNT_OPTS.get(fs_type, []),
+            "size_gb": size_gb,
+            "in_memory": True,
+        }
+        try:
+            host_sh(f"mkdir -p {data_dir}")
+            host_sh(f"chmod 0777 {data_dir}")
+        except Exception:
+            teardown(state)
+            raise
+        return state
+
     # A fresh sparse file per leg. Sparse so the image costs nothing until
     # the filesystem writes to it.
     host_sh(f"rm -f {image}")
@@ -418,6 +458,7 @@ def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
         "dataset": None,
         "opts": MOUNT_OPTS.get(fs_type, []),
         "size_gb": size_gb,
+        "in_memory": False,
     }
 
     try:

@@ -25,10 +25,18 @@
 # Adding another database is one line: add it to `systems` below and the
 # legs become <database> x <filesystem>. The leg slug, the parity check
 # and the report table all key off that pair.
+#
+# The second database layout lives in its own scenario (fs-norm.yaml) and
+# runs on its own runner: the filesystems of one scenario have to share a
+# disk to be comparable, and two scenarios want two runners.
+#
+# tmpfs is in the list on purpose. It is not a disk, so it is not a peer —
+# it is the baseline that answers "what does the disk cost?" by being the
+# same workload with no disk under it.
 
 id: fs
 systems: [postgres/jsonb]
-filesystems: [ext4, xfs, btrfs, zfs]
+filesystems: [ext4, xfs, btrfs, zfs, tmpfs]
 shape: counter
 scale: medium
 

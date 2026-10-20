@@ -11,7 +11,7 @@ runnable by a reader who distrusts the number.
 
 | Benchmark | Question | Headline |
 | --- | --- | --- |
-| [prom-vs-postgres](benchctl/scenarios/prom-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [prom-vs-postgres](benchctl/scenarios/prom-vs-pg-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
 | [fs](benchctl/scenarios/fs.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database, four filesystems, everything else held constant |
 
 Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
@@ -22,7 +22,7 @@ published.
 
 ```sh
 cd benchctl
-make run SCENARIO=scenarios/prom-load.yaml
+make run SCENARIO=scenarios/prom-vs-pg-load.yaml
 ```
 
 `make run` writes `results/report.md`. Scenarios are separately runnable
@@ -31,9 +31,9 @@ catalogue:
 
 | Scenario | What it measures |
 | --- | --- |
-| `scenarios/prom-load.yaml` | Prometheus under a ramping load, to its breaking point |
-| `scenarios/pg-load.yaml` | Prometheus and PostgreSQL side by side under the same ramp |
-| `scenarios/fs.yaml` | One database on ext4, XFS, btrfs and ZFS |
+| `scenarios/prom-vs-pg-load.yaml` | Prometheus and both PostgreSQL layouts under one ramp |
+| `scenarios/fs.yaml` | One database on ext4, XFS, btrfs, ZFS and tmpfs |
+| `scenarios/fs-norm.yaml` | The other database layout, on the same five filesystems |
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
 It runs as a matrix — one runner per scenario — and the matrix is built by

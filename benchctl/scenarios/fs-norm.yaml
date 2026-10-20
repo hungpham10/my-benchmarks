@@ -1,0 +1,67 @@
+# The filesystem loadtest, second database layout.
+#
+# Same question as fs.yaml — where should a PostgreSQL data directory live?
+# — but with the other schema: a plain heap table with a BRIN index on
+# time and a separate series dimension table, instead of one jsonb row per
+# sample with a GIN index over the label document.
+#
+# The layout matters to the answer. jsonb stores the label document again
+# on every row and reaches a series through an index of postings; the
+# normalised layout stores the identity once and reaches it through a
+# surrogate key, with BRIN summarising the time column. The two put very
+# different pressure on a filesystem: one writes a lot of index and
+# metadata, the other writes a lot of sequential heap.
+#
+# It is a separate scenario, on its own runner, for one reason: the
+# filesystems inside a scenario have to share a disk to be comparable.
+# Two scenarios, two runners, two disks — and we never compare a
+# filesystem across them.
+
+id: fs-norm
+systems: [postgres/norm]
+filesystems: [ext4, xfs, btrfs, zfs, tmpfs]
+shape: counter
+scale: medium
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  stages:
+    - { target: 10,  duration: 30s }
+    - { target: 200, duration: 2m }
+    - { target: 500, duration: 2m }
+  graceful_ramp_down: 30s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 90
+
+env:
+  QBENCH_MEASURE: "10"
+  QBENCH_BUDGET_S: "45"
+
+# Same dataset as fs.yaml, so the two layouts are comparable with each
+# other: 20k series x 180 samples = 3.6M samples.
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  postgres/norm:
+    query: q1_counter_rate
+    table: metrics_norm_brin
+
+# The longest scenario: five legs, each with a bulk load, a query sweep, a
+# load phase and a cold-cache phase. It also needs the filesystem tooling
+# on the runner, and its results are the evidence behind a published
+# chapter, so they are kept longer.
+ci:
+  job_timeout_minutes: 120
+  artifact_days: 180
+  fs_tools: true
