@@ -19,7 +19,7 @@
 
 id: fs-norm
 systems: [postgres/norm]
-filesystems: [ext4, xfs, btrfs, zfs, tmpfs]
+filesystems: [ext4, xfs, btrfs, zfs, f2fs]
 shape: counter
 scale: medium
 

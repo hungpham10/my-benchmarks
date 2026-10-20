@@ -30,13 +30,20 @@
 # runs on its own runner: the filesystems of one scenario have to share a
 # disk to be comparable, and two scenarios want two runners.
 #
-# tmpfs is in the list on purpose. It is not a disk, so it is not a peer —
-# it is the baseline that answers "what does the disk cost?" by being the
-# same workload with no disk under it.
+# tmpfs is deliberately NOT in the list. It would be the baseline that
+# answers "what does the disk cost?", but its pages are charged to the
+# container's memory limit like any other memory, and at this dataset size
+# the data and the WAL alone do not fit inside the envelope. A baseline
+# that needs a different envelope is not a baseline. The code for it is in
+# shared/fssetup.py if a smaller dataset ever wants it.
+#
+# f2fs is the fifth filesystem: log-structured, checkpointing instead of
+# journaling, built for flash. If the runner cannot format it, the matrix
+# records the gap and the leg is skipped — a gap, not a failed run.
 
 id: fs
 systems: [postgres/jsonb]
-filesystems: [ext4, xfs, btrfs, zfs, tmpfs]
+filesystems: [ext4, xfs, btrfs, zfs, f2fs]
 shape: counter
 scale: medium
 

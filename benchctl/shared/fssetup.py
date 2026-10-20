@@ -51,7 +51,7 @@ import sys
 #     metadata write on the first read of every file)
 #   - no discard (the backing file is sparse; discarding would make the
 #     reported free space a fiction)
-FS_TYPES = ("ext4", "xfs", "btrfs", "zfs", "tmpfs")
+FS_TYPES = ("ext4", "xfs", "btrfs", "zfs", "f2fs", "tmpfs")
 
 MOUNT_OPTS = {
     "ext4": ["noatime"],
@@ -60,6 +60,9 @@ MOUNT_OPTS = {
     # backing file makes the reported free space a fiction.
     "btrfs": ["noatime", "nodiscard"],
     "zfs": [],          # ZFS gets atime=off on the dataset instead
+    # f2fs is the flash-optimised filesystem: log-structured, with a
+    # checkpointing scheme instead of a journal.
+    "f2fs": ["noatime"],
     # tmpfs is the baseline, not a peer: there is no disk under it. It is
     # mounted with a size limit so it cannot eat the machine, and noatime
     # like the others.
@@ -263,6 +266,7 @@ def _missing_tools_message(missing):
         "mkfs.ext4": "e2fsprogs",
         "mkfs.xfs": "xfsprogs",
         "mkfs.btrfs": "btrfs-progs",
+        "mkfs.f2fs": "f2fs-tools",
         "zpool": "zfsutils-linux",
         "fio": "fio",
     }
@@ -285,6 +289,30 @@ def availability(requested=None):
     for fs_type in (requested or FS_TYPES):
         if fs_type == "tmpfs":
             # tmpfs is in every kernel; there is nothing to install.
+            out[fs_type] = {"available": True, "reason": ""}
+            continue
+        if fs_type == "f2fs":
+            # f2fs is the flash-optimised filesystem. Its tools are not
+            # preinstalled everywhere, and the kernel may not have the
+            # module: a gap in the matrix, not a failed run.
+            if not _has("mkfs.f2fs"):
+                out[fs_type] = {
+                    "available": False,
+                    "reason": "mkfs.f2fs is not installed — "
+                              + _missing_tools_message(["mkfs.f2fs"]),
+                }
+                continue
+            if "f2fs" not in host_out("cat /proc/filesystems 2>/dev/null || true"):
+                mod = host_sh("modprobe f2fs 2>&1", check=False)
+                if mod.returncode != 0 or \
+                        "f2fs" not in host_out("cat /proc/filesystems 2>/dev/null || true"):
+                    out[fs_type] = {
+                        "available": False,
+                        "reason": "f2fs kernel support unavailable: "
+                                  + (mod.stderr.strip() or mod.stdout.strip()
+                                     or "not in /proc/filesystems"),
+                    }
+                    continue
             out[fs_type] = {"available": True, "reason": ""}
             continue
         if fs_type == "zfs":
@@ -334,6 +362,9 @@ def _mkfs_script(fs_type, device):
         # logical sectors and ZFS would otherwise pick a 512-byte ashift and
         # warn about it.
         return (f"zpool create -f -o ashift=12 benchfs {device}")
+    if fs_type == "f2fs":
+        # -f: the device is not a block device with a partition table.
+        return f"mkfs.f2fs -q -f {device}"
     raise FsError(f"unknown filesystem: {fs_type}")
 
 
