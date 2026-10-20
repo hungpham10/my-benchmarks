@@ -11,30 +11,58 @@ runnable by a reader who distrusts the number.
 
 | Benchmark | Question | Headline |
 | --- | --- | --- |
-| [prom-vs-postgres](prom-vs-postgres/) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [prom-vs-postgres](benchctl/scenarios/counter-rate.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [fs-matrix](benchctl/scenarios/fs-matrix.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database, four filesystems, everything else held constant |
+
+Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
+one envelope, one set of rules about what a number has to be before it can be
+published.
 
 ## Running a benchmark
 
-Each one is self-contained and starts the same way:
-
 ```sh
-cd prom-vs-postgres
-make build
-make bench
+cd benchctl
+make run SCENARIO=scenarios/counter-rate.yaml
 ```
 
-`make bench` runs every phase in order and writes `results/report.md`. Phases
-are separately runnable (`make ingest`, `make query`) because they are
-separately diagnosable.
+`make run` writes `results/report.md`. Scenarios are separately runnable
+because they are separately diagnosable.
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
 `scale=smoke` finishes in about two minutes and checks that the harness still
 runs. `scale=full` takes roughly forty and regenerates `results/`.
+`scale=fs` runs the filesystem matrix: four filesystems, one database.
 
-`prom-vs-postgres` also ships an optional monitoring stack: cAdvisor, a host
-exporter and both databases' own metrics feed a Grafana dashboard, so a run can
-be judged on what it cost the machine as well as how fast it was. See
-[Watching a run](prom-vs-postgres/README.md#watching-a-run).
+The harness also ships an optional monitoring stack: cAdvisor, a host exporter
+and both databases' own metrics feed a Grafana dashboard, so a run can be judged
+on what it cost the machine as well as how fast it was. See
+[Watching a run](benchctl/README.md#watching-a-run).
+
+## The filesystem matrix
+
+A container cannot format a filesystem, so the filesystem under test lives on
+the machine that runs the Docker daemon and the container bind-mounts a
+directory inside it:
+
+```
+/mnt/benchctl-fs/fs/xfs.img        sparse file on the runner's disk
+  └─ losetup --direct-io=on        -> /dev/loop0
+       └─ mkfs.xfs                 -> mounted at /mnt/benchctl-fs/mnt/xfs
+            └─ bind mount          -> the container's data directory
+```
+
+`--direct-io=on` is not decoration. Without it the host page cache absorbs
+every write before it reaches the device, and the filesystem under test would
+never touch the disk — the benchmark would be measuring the host's cache.
+
+The matrix covers ext4, XFS, btrfs and ZFS. Each leg runs the same image, the
+same dataset, the same queries and the same envelope; only the filesystem
+changes. `shared/fssetup.py` does the provisioning, and it works on a GitHub
+Actions runner (`sudo` on the runner) and on a macOS box with Colima
+(`colima ssh`). A filesystem that cannot be provisioned on the host — ZFS
+without its kernel module, for instance — is recorded as a gap in
+`results/fs-availability.json` and listed in the report, never silently
+dropped.
 
 ## What every benchmark here has in common
 

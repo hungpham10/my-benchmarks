@@ -53,9 +53,12 @@ export default function () {
 }
 
 export function handleSummary(data) {
-  // One summary file per system so each leg's k6 numbers survive instead of
+  // One summary file per leg so each leg's k6 numbers survive instead of
   // being overwritten by the next leg. plan.system is like "postgres/jsonb";
-  // slug it to "postgres-jsonb" for a safe filename.
-  const slug = (plan.system || 'system').replace(/\//g, '-');
+  // slug it to "postgres-jsonb" for a safe filename. When the scenario has a
+  // filesystem dimension, plan.fs is appended — the same rule as
+  // shared/leg.py, which is what the verifier matches against.
+  const slug = (plan.system || 'system').replace(/\//g, '-')
+    + (plan.fs ? '-' + plan.fs : '');
   return { [`/results/summary-${slug}.json`]: JSON.stringify(data) };
 }

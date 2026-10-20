@@ -1,0 +1,62 @@
+# Filesystem matrix: one database, four filesystems.
+#
+# The question is not "which database is faster" — it is "where should this
+# database's data directory live". Everything except the filesystem is held
+# constant: same image, same dataset, same envelope, same queries, same
+# order of operations. The only thing that changes between legs is the
+# filesystem the data directory sits on.
+#
+# What is expected to move:
+#   - the write path (bulk COPY during init, WAL fsyncs, checkpoints)
+#   - fsync latency, measured directly by pg_test_fsync on the data dir
+#   - space used, because btrfs and ZFS do not store files the way ext4 does
+#
+# What is expected NOT to move much: read latency. The working set fits in
+# RAM, so reads come from the page cache and the filesystem is not involved.
+# That is worth measuring rather than assuming — "the filesystem does not
+# matter for reads" is a useful result, and it only becomes useful if it
+# was measured.
+
+id: fs-matrix
+systems: [postgres/jsonb]
+filesystems: [ext4, xfs, btrfs, zfs]
+shape: counter
+scale: medium
+
+# Shorter than the main scenario: four legs, and the load phase is a read
+# workload that the page cache serves. The write path is the init.
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  stages:
+    - { target: 10,  duration: 30s }
+    - { target: 200, duration: 2m }
+    - { target: 500, duration: 2m }
+  graceful_ramp_down: 30s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 90
+
+# Four legs have to fit in the CI budget, so the query sweep is shorter than
+# the default. Same queries, fewer iterations.
+env:
+  QBENCH_MEASURE: "10"
+  QBENCH_BUDGET_S: "45"
+
+# Same dataset as the main scenario, so the numbers are comparable with the
+# Prometheus-vs-PostgreSQL chapter. 20k series x 180 samples = 3.6M samples.
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  postgres/jsonb:
+    query: q1_counter_rate
+    table: metrics_jsonb

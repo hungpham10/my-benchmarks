@@ -28,7 +28,7 @@ on:
       scale:
         description: Benchmark scale
         type: choice
-        options: [smoke, load, pg, full]
+        options: [smoke, load, pg, fs, full]
         default: full
       publish:
         description: Open a PR with the results
@@ -44,6 +44,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  fs-smoke:
+    # The filesystem path is only exercised by the fs scenarios: it formats
+    # real filesystems on the runner's loop devices and bind-mounts them into
+    # the container's data directory. A PR check that skipped it would let
+    # that rot until a nightly run noticed. Separate job, separate runner,
+    # separate results/ — two scenarios in one results directory would have
+    # the parity check comparing datasets that were never meant to match.
+    #
+    # Skipped when the main job is already running the filesystem matrix:
+    # same code path, four times the data.
+    if: github.event_name != 'workflow_dispatch' || inputs.scale != 'fs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    env:
+      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}-fssmoke
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Install filesystem tools
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            e2fsprogs xfsprogs btrfs-progs zfsutils-linux
+          sudo modprobe loop || true
+          sudo modprobe zfs || true
+
+      - name: Install driver deps
+        run: pip install numpy cramjam pyyaml 'psycopg[binary]'
+
+      - name: Run the filesystem smoke check
+        working-directory: benchctl
+        run: |
+          rm -rf results plan.json docker-compose.gen.yml compose.gen.json
+          mkdir -p results
+          python3 driver/run.py scenarios/fs-smoke.yaml
+          python3 verify/check.py
+
+      - name: Tear down
+        if: always()
+        run: |
+          sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
+          for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
+            sudo losetup -d "$dev" 2>/dev/null || true
+          done
+          sudo rm -rf /mnt/benchctl-fs 2>/dev/null || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fs-smoke-results-${{ github.run_number }}
+          path: benchctl/results/
+          if-no-files-found: error
+          retention-days: 90
+
   bench:
     runs-on: ubuntu-latest
     # Full scale: up + init (3.6M samples) + k6 ramp (~14 min) + verify.
@@ -100,6 +164,9 @@ jobs:
           elif [ "${{ inputs.scale }}" = "pg" ]; then
             echo 'SCENARIO=scenarios/load-test-pg.yaml' >> "$GITHUB_ENV"
             echo "load-test-pg (dispatch)"
+          elif [ "${{ inputs.scale }}" = "fs" ]; then
+            echo 'SCENARIO=scenarios/fs-matrix.yaml' >> "$GITHUB_ENV"
+            echo "fs-matrix (dispatch)"
           else
             echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
             echo "full"
@@ -111,6 +178,27 @@ jobs:
         # the dataset; pyyaml reads scenario + module files; psycopg for
         # postgres init.
         run: pip install numpy cramjam pyyaml 'psycopg[binary]'
+
+      - name: Install filesystem tools
+        # The filesystem matrix formats real filesystems on the runner's loop
+        # devices, so the tools that do it have to be there: xfsprogs and
+        # btrfs-progs are not preinstalled, and ZFS needs its kernel module,
+        # which on the runner's kernel comes from linux-modules-extra rather
+        # than from the kernel image the runner booted.
+        #
+        # The extra-modules package is best effort: it does not exist for
+        # every kernel a runner might boot, and a missing ZFS module is
+        # recorded as a gap in the results, not as a failed run.
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            e2fsprogs xfsprogs btrfs-progs zfsutils-linux
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" \
+            || echo "::warning::no linux-modules-extra for kernel $(uname -r)"
+          sudo modprobe loop || true
+          sudo modprobe zfs || true
+          echo "loop devices: $(ls /dev/loop* 2>/dev/null | wc -l)"
+          echo "zfs module: $(lsmod | grep -c '^zfs' || true)"
 
       - name: Run the benchmark
         # Start from an empty results/, not just missing files. A run that
@@ -144,6 +232,15 @@ jobs:
         run: |
           (docker compose -f ../monitoring/compose.monitoring.yml down -v || docker-compose -f ../monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
           docker network rm benchctl-mon 2>/dev/null || true
+          # The filesystem matrix mounts filesystems on the runner. If the
+          # run died mid-leg, the mount and the loop device are still there.
+          # Only detach ours: `losetup -D` would take every loop device on
+          # the runner with it.
+          sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
+          for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
+            sudo losetup -d "$dev" 2>/dev/null || true
+          done
+          sudo rm -rf /mnt/benchctl-fs 2>/dev/null || true
 
       - name: Upload results
         if: always()

@@ -18,7 +18,8 @@ RESULTS = os.path.join(os.path.dirname(os.path.dirname(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARED = os.path.join(ROOT, "shared")
 sys.path.insert(0, SHARED)
-import queries as Q
+import queries as Q  # noqa: E402
+from leg import leg_slug  # noqa: E402 — same slug rule as the driver and k6
 
 
 def load_all_summaries():
@@ -53,11 +54,16 @@ def check_parity():
     for f in stats_files:
         stats = json.load(open(os.path.join(RESULTS, f)))
         module = stats["module"]
+        # A leg is a (system, filesystem) pair. Keying by the system alone
+        # would let the four filesystem legs overwrite each other, and the
+        # parity check would compare a filesystem with itself.
+        fs = stats.get("fs") or ""
+        key = f"{module}@{fs}" if fs else module
         count = stats["samples"]
         sum_val = stats["sum"]
 
-        module_stats[module] = {"count": count, "sum": sum_val}
-        print(f"[parity] {module}: count={count}, sum={sum_val}")
+        module_stats[key] = {"count": count, "sum": sum_val}
+        print(f"[parity] {key}: count={count}, sum={sum_val}")
 
     # Compare counts with small tolerance (Prometheus ingestion may drop a
     # handful of samples under WAL backpressure). Sums are logged for
@@ -139,9 +145,10 @@ def check_server_requests():
         server = disk.get("server_requests")
         if server is None:
             return False, f"{disk['module']}: driver never recorded server_requests"
-        # Match disk module name (e.g. "postgres/jsonb") to summary slug
-        # (e.g. "postgres-jsonb") by replacing "/" with "-".
-        slug = disk["module"].replace("/", "-")
+        # Match disk module name (e.g. "postgres/jsonb") plus filesystem (e.g.
+        # "xfs") to the summary slug (e.g. "postgres-jsonb-xfs"). Same rule as
+        # shared/leg.py.
+        slug = leg_slug(disk["module"], disk.get("fs"))
         s = summaries.get(slug)
         client = None
         if s:
@@ -159,7 +166,8 @@ def check_server_requests():
         gap = client - server
         tol = max(50, int(client * 0.05))
         status = "ok" if 0 <= gap <= tol else "GAP"
-        worst.append(f"{disk['module']}: client={client} server={server} "
+        label = disk["module"] + (f" on {disk['fs']}" if disk.get("fs") else "")
+        worst.append(f"{label}: client={client} server={server} "
                      f"gap={gap} [{status}]")
     # Non-fatal: pg_stat_statements may not track every normalized query
     # (e.g. xk6-sql prepared statements). Parity passing proves data integrity.

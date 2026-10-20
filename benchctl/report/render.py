@@ -6,6 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared"))
 import queries as Q  # noqa: E402  (LABELS map for display names)
+from leg import leg_slug  # noqa: E402  (one slug rule, shared with the driver)
 
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
@@ -66,7 +67,7 @@ def render_disk(disk_files):
     out.append("|--------|---------|-------|----------|")
     for f in sorted(disk_files):
         d = json.load(open(os.path.join(RESULTS, f)))
-        out.append(f"| {d['module']} | {d['samples']:,} | {fmt_bytes(d['bytes_on_disk'])} | {d['bytes_per_sample']:.2f} |")
+        out.append(f"| {leg_label(d)} | {d['samples']:,} | {fmt_bytes(d['bytes_on_disk'])} | {d['bytes_per_sample']:.2f} |")
     out.append("")
     return "\n".join(out)
 
@@ -120,11 +121,17 @@ def render_resource(resources):
     return "\n".join(out)
 
 
+def leg_label(d):
+    """'postgres/jsonb' + 'xfs' -> 'postgres/jsonb on xfs'."""
+    fs = d.get("fs")
+    return f"{d.get('module', 'unknown')} on {fs}" if fs else d.get("module", "unknown")
+
+
 def render_queries(query_files):
     """Render per-query latency table across all systems.
 
     Each queries-<slug>.json holds {query_name: {intent, winner_expected,
-    promql, n, errors, p50_ms, p95_ms, max_ms, error}}.
+    promql, n, errors, p50_ms, p95_ms, max_ms, error}}, plus module/fs/run_id.
     """
     out = ["## Query Latency (q1–q5, measured)"]
     if not query_files:
@@ -134,16 +141,19 @@ def render_queries(query_files):
     all_results = {}
     for f in sorted(query_files):
         d = json.load(open(os.path.join(RESULTS, f)))
-        module = d.get("module", "unknown")
-        all_results[module] = d
+        # Keyed by leg, not by module: the filesystem matrix runs the same
+        # module on several filesystems, and keying by module would let each
+        # leg overwrite the previous one.
+        all_results[leg_label(d)] = d
 
     if not all_results:
         out.append("No query data.")
         return "\n".join(out)
 
-    # Collect query names from the first result (skip module/run_id keys).
+    # Collect query names from the first result (skip the metadata keys).
     first = next(iter(all_results.values()))
-    query_names = [k for k in first.keys() if k not in ("module", "run_id")]
+    meta_keys = ("module", "fs", "run_id")
+    query_names = [k for k in first.keys() if k not in meta_keys]
 
     # Build module list from actual result keys (not hardcoded wrong keys),
     # keyed to Q.LABELS display names. Unknown modules fall back to raw key.
@@ -228,10 +238,10 @@ def render_caveats(stats_files, disk_files=None):
     counts = {}
     for f in sorted(stats_files):
         d = json.load(open(os.path.join(RESULTS, f)))
-        module = d.get("module", "unknown")
+        label = leg_label(d)
         count = d.get("samples", 0)
-        counts[module] = count
-        out.append(f"- {module}: retained {count:,} samples.")
+        counts[label] = count
+        out.append(f"- {label}: retained {count:,} samples.")
 
     # Parity note: compare counts only; sum is diagnostic.
     prom_count = counts.get("prometheus")
@@ -253,13 +263,148 @@ def render_caveats(stats_files, disk_files=None):
             d = json.load(open(os.path.join(RESULTS, f)))
             code = d.get("k6_exit_code")
             if code == 99:
-                broke.append(d["module"])
+                broke.append(leg_label(d))
         if broke:
             out.append(f"- Breaking point reached: {', '.join(broke)} (k6 exit 99).")
         else:
             out.append("- Breaking point: not reached (no k6 threshold broke).")
 
     out.append("- Disk bytes include WAL; Postgres figure is real COPY bytes, not a hardcoded constant.")
+    out.append("")
+    return "\n".join(out)
+
+
+def _fs_legs(disk_files, prefix):
+    """{fs_type: data} for one kind of per-leg result file.
+
+    Keyed by filesystem rather than by slug, because the filesystem is the
+    axis the reader is comparing along.
+    """
+    out = {}
+    for f in sorted(disk_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        fs = d.get("fs")
+        if not fs:
+            continue
+        slug = leg_slug(d["module"], fs)
+        path = os.path.join(RESULTS, f"{prefix}-{slug}.json")
+        if os.path.exists(path):
+            out[fs] = json.load(open(path))
+    return out
+
+
+def render_fs_environment(fs_probes):
+    """What each filesystem was, as it described itself."""
+    out = ["## Filesystem Environment"]
+    out.append("| Filesystem | Device | Mount options | Block size | Notes |")
+    out.append("|------------|--------|---------------|------------|-------|")
+    for fs in sorted(fs_probes):
+        p = fs_probes[fs]
+        notes = []
+        if p.get("zfs_properties"):
+            props = p["zfs_properties"]
+            notes.append(f"recordsize {props.get('recordsize', '?')}, "
+                         f"compression {props.get('compression', '?')}")
+        if p.get("backend"):
+            notes.append(f"host backend: {p['backend']}")
+        block = p.get("block_size")
+        out.append(f"| {fs} | `{p.get('device', '?')}` | "
+                   f"`{p.get('mount_options', '?')}` | "
+                   f"{block if block else '?'} | {', '.join(notes)} |")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_fs_write(disk_files, fsync_files, io_files):
+    """The write path: where the filesystem actually shows up."""
+    fsyncs = _fs_legs(disk_files, "fsync")
+    ios = _fs_legs(disk_files, "io")
+    out = ["## Filesystem Matrix — Write Path"]
+    out.append("| Filesystem | fdatasync µs | fsync µs | COPY s | samples/s | on disk | PG write µs/op | writeback µs/op |")
+    out.append("|------------|---------------|----------|--------|-----------|---------|-----------------|------------------|")
+    for f in sorted(disk_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        fs = d.get("fs")
+        if not fs:
+            continue
+        fsb = fsyncs.get(fs, {})
+        io = ios.get(fs, {}).get("after_write", {})
+        copy_s = d.get("seconds")
+        sps = d.get("samples_per_second")
+        out.append(
+            f"| {fs} | {fsb.get('fdatasync_us', 'n/a')} | "
+            f"{fsb.get('fsync_us', 'n/a')} | "
+            f"{copy_s if copy_s is not None else 'n/a'} | "
+            f"{f'{sps:,.0f}' if sps else 'n/a'} | "
+            f"{fmt_bytes(d.get('bytes_on_disk', 0))} | "
+            f"{io.get('write_us_avg', 'n/a')} | "
+            f"{io.get('writeback_us_avg', 'n/a')} |")
+    out.append("")
+    out.append("fdatasync µs / fsync µs: pg_test_fsync on the data directory "
+               "itself; fdatasync is what PostgreSQL's WAL pays on Linux. "
+               "COPY s: the bulk load, one transaction. "
+               "PG write µs/op: pg_stat_io, what PostgreSQL measured at the "
+               "syscall boundary. writeback µs/op: the checkpointer flushing "
+               "dirty pages (PG 18).")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_fs_read(disk_files, io_files, query_files, summaries):
+    """The read path: mostly the page cache, and that is the finding."""
+    ios = _fs_legs(disk_files, "io")
+    queries = _fs_legs(disk_files, "queries")
+    out = ["## Filesystem Matrix — Read Path"]
+    out.append("| Filesystem | q1 p50 ms | q1 p95 ms | k6 p95 ms | PG read µs/op |")
+    out.append("|------------|-----------|-----------|------------|----------------|")
+    for f in sorted(disk_files):
+        d = json.load(open(os.path.join(RESULTS, f)))
+        fs = d.get("fs")
+        if not fs:
+            continue
+        q = queries.get(fs, {})
+        q1 = q.get("q1_counter_rate", {})
+        io = ios.get(fs, {}).get("after_read", {})
+        slug = leg_slug(d["module"], fs)
+        k6 = summaries.get(slug, {})
+        m = k6.get("metrics", {})
+        dur = m.get("iteration_duration") or m.get("http_req_duration", {})
+        vals = dur.get("values", {})
+        out.append(
+            f"| {fs} | {q1.get('p50_ms', 'n/a')} | {q1.get('p95_ms', 'n/a')} | "
+            f"{fmt_ms(vals.get('p(95)', 0)) if vals else 'n/a'} | "
+            f"{io.get('read_us_avg', 'n/a')} |")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_fs_caveats(fs_probes, availability=None):
+    """The things a reader must know before quoting these numbers."""
+    out = ["## Filesystem Caveats"]
+    for fs in sorted(fs_probes):
+        out.append(f"- **{fs}**: block size "
+                   f"{fs_probes[fs].get('block_size', '?')} B, mounted "
+                   f"`{fs_probes[fs].get('mount_options', '?')}`.")
+    out.append("- Every filesystem sits on a loop device backed by a file on "
+               "the runner's own disk. The comparison between filesystems is "
+               "meaningful; the absolute numbers describe that disk, not a "
+               "bare device.")
+    out.append("- The loop device runs with --direct-io=on, so the host page "
+               "cache cannot absorb writes before they reach the disk. "
+               "Without it, this would measure the host's cache.")
+    out.append("- The dataset is smaller than RAM. Reads are served from the "
+               "page cache, so the read path barely moves between "
+               "filesystems — that is a result, not a missing measurement.")
+    if "zfs" in fs_probes:
+        out.append("- ZFS keeps its own cache (ARC) in host memory, capped at "
+                   "the envelope size. It also writes in 128K records rather "
+                   "than 4K blocks, which is a real difference and not a "
+                   "tuning choice.")
+    if availability:
+        for fs, info in sorted(availability.items()):
+            if not info.get("available"):
+                out.append(f"- **{fs} was not measured**: {info.get('reason')}. "
+                           "It is a gap in the matrix, not a zero.")
     out.append("")
     return "\n".join(out)
 
@@ -294,6 +439,17 @@ def main():
     stats_files = [f for f in os.listdir(RESULTS) if f.startswith("stats-")]
     if stats_files:
         lines.append(render_caveats(stats_files, disk_files))
+
+    # Filesystem matrix, when the scenario has one.
+    fs_probes = {}
+    for f in os.listdir(RESULTS):
+        if f.startswith("fs-") and f.endswith(".json") and f != "fs-availability.json":
+            fs_probes[f[3:-5]] = load(f)
+    if fs_probes:
+        lines.append(render_fs_environment(fs_probes))
+        lines.append(render_fs_write(disk_files, None, None))
+        lines.append(render_fs_read(disk_files, None, None, summaries))
+        lines.append(render_fs_caveats(fs_probes, load("fs-availability.json") or None))
 
     with open(OUT, "w") as f:
         f.write("\n".join(lines))

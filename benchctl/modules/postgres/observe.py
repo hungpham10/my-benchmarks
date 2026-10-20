@@ -12,6 +12,7 @@ Both print JSON, last line.
 import json
 import os
 import sys
+from decimal import Decimal
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -130,6 +131,99 @@ def sample_stats(variant=None):
     return {"samples": count, "sum": sum_val}
 
 
+def io_stats():
+    """What the filesystem did, as PostgreSQL accounted for it.
+
+    pg_stat_io counts the syscalls PostgreSQL made and how long each one
+    took. write_time, fsync_time, writeback_time and read_time are the
+    filesystem's own numbers, measured at the syscall boundary, from the same
+    process that produced the workload. That makes them the closest thing to
+    a filesystem benchmark a database can give us — and unlike a synthetic
+    fio run, they describe the I/O the database actually did.
+
+    The columns changed between versions (fsyncs/fsync_time arrived in
+    PG 17; writebacks/writeback_time and the per-operation byte counters are
+    new in PG 18), so the query is built from the columns the server
+    actually has rather than from a guess.
+    """
+    dsn = _rewrite_dsn(PG_DSN, PG_PORT)
+    conn = psycopg.connect(dsn, autocommit=True)
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'pg_catalog' AND table_name = 'pg_stat_io'
+        """)
+        have = {r[0] for r in cur.fetchall()}
+        if not have:
+            return {"available": False, "reason": "pg_stat_io does not exist"}
+
+        wanted = [
+            ("reads", "reads"), ("read_time", "read_time"),
+            ("read_bytes", "read_bytes"),
+            ("writes", "writes"), ("write_time", "write_time"),
+            ("write_bytes", "write_bytes"),
+            ("writebacks", "writebacks"), ("writeback_time", "writeback_time"),
+            ("extends", "extends"), ("extend_time", "extend_time"),
+            ("extend_bytes", "extend_bytes"),
+            ("fsyncs", "fsyncs"), ("fsync_time", "fsync_time"),
+        ]
+        cols = [(col, alias) for col, alias in wanted if col in have]
+        select = ", ".join(f"sum({col}) AS {alias}" for col, alias in cols)
+        cur.execute(f"""
+            SELECT backend_type, {select}
+            FROM pg_stat_io
+            GROUP BY backend_type
+            ORDER BY backend_type
+        """)
+        names = [d[0] for d in cur.description]
+        # The byte counters are `numeric`, which comes back as Decimal.
+        # Decimal does not survive JSON serialisation, and mixing it with
+        # float raises on division, so everything is normalised to float
+        # here rather than at every use.
+        per_backend = [
+            {k: (float(v) if isinstance(v, Decimal) else v)
+             for k, v in zip(names, r)}
+            for r in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        conn.close()
+
+    def total(key):
+        return float(sum((r.get(key) or 0) for r in per_backend))
+
+    def avg_us(time_key, count_key):
+        n = total(count_key)
+        t = total(time_key)
+        return round(t * 1000 / n, 1) if n else None
+
+    return {
+        "available": True,
+        "columns": sorted(have),
+        "writes": int(total("writes")),
+        "write_ms": float(total("write_time")),
+        # Average latency per operation. These are the numbers the report
+        # puts side by side: the same write, on four filesystems.
+        "write_us_avg": avg_us("write_time", "writes"),
+        "writebacks": int(total("writebacks")),
+        "writeback_ms": float(total("writeback_time")),
+        "writeback_us_avg": avg_us("writeback_time", "writebacks"),
+        "fsyncs": int(total("fsyncs")),
+        "fsync_ms": float(total("fsync_time")),
+        "fsync_us_avg": avg_us("fsync_time", "fsyncs"),
+        "reads": int(total("reads")),
+        "read_ms": float(total("read_time")),
+        "read_us_avg": avg_us("read_time", "reads"),
+        "extends": int(total("extends")),
+        "extend_ms": float(total("extend_time")),
+        "extend_us_avg": avg_us("extend_time", "extends"),
+        "write_bytes": int(total("write_bytes")),
+        "read_bytes": int(total("read_bytes")),
+        "per_backend": per_backend,
+    }
+
+
 def _read_dataset():
     """Read dataset.json and return (window_minutes, t_start_ms, t_end_ms)."""
     results_dir = os.environ.get(
@@ -177,7 +271,9 @@ def qbench(variant=None):
             cur.close()
             return n
 
-        results = run_all(exec_fn, t_start_ms, t_end_ms, backend)
+        results = run_all(exec_fn, t_start_ms, t_end_ms, backend,
+                          measure=int(os.environ.get("QBENCH_MEASURE", "30")),
+                          max_budget_s=int(os.environ.get("QBENCH_BUDGET_S", "120")))
     finally:
         conn.close()
     print(json.dumps(results))
@@ -192,6 +288,8 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "qbench":
         variant = sys.argv[2] if len(sys.argv) > 2 else None
         qbench(variant)
+    elif len(sys.argv) > 1 and sys.argv[1] == "io":
+        print(json.dumps(io_stats()))
     else:
         # When run standalone, use QUERY_MARKER from env if set.
         filter_sql = os.environ.get("QUERY_MARKER")
