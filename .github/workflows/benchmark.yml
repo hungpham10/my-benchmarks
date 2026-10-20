@@ -49,6 +49,12 @@ jobs:
 
       - name: Build the matrix
         id: build
+        env:
+          # An empty input means "run them all". The filter lives here and
+          # not in the job's `if`: the matrix context is not available there,
+          # because a job's condition is evaluated before the matrix is
+          # expanded.
+          WANT: ${{ inputs.scenario }}
         run: |
           pip install --quiet pyyaml
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -58,11 +64,15 @@ jobs:
 
           import yaml
 
+          want = os.environ.get("WANT", "").strip()
+
           entries = []
           for path in sorted(glob.glob("benchctl/scenarios/*.yaml")):
               with open(path) as f:
                   s = yaml.safe_load(f)
               if not s or "id" not in s:
+                  continue
+              if want and s["id"] != want:
                   continue
               ci = s.get("ci") or {}
               entries.append({
@@ -77,7 +87,7 @@ jobs:
               })
 
           if not entries:
-              raise SystemExit("no scenarios found in benchctl/scenarios/")
+              raise SystemExit(f"no scenario matched {want!r}")
           print(f"matrix={json.dumps(entries)}")
           for e in entries:
               print(f"  {e['scenario']}: timeout={e['timeout_minutes']}min, "
@@ -86,8 +96,6 @@ jobs:
 
   bench:
     needs: prepare
-    # An empty input means "run them all".
-    if: ${{ inputs.scenario == '' || inputs.scenario == matrix.scenario }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
