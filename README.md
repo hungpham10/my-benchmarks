@@ -12,7 +12,7 @@ runnable by a reader who distrusts the number.
 | Benchmark | Question | Headline |
 | --- | --- | --- |
 | [prom-vs-postgres](benchctl/scenarios/prom-vs-pg-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
-| [fs](benchctl/scenarios/fs.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database, four filesystems, everything else held constant |
+| [fs-jsonb](benchctl/scenarios/fs-jsonb.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database layout, five filesystems, everything else held constant |
 
 Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
 one envelope, one set of rules about what a number has to be before it can be
@@ -32,7 +32,7 @@ catalogue:
 | Scenario | What it measures |
 | --- | --- |
 | `scenarios/prom-vs-pg-load.yaml` | Prometheus and both PostgreSQL layouts under one ramp |
-| `scenarios/fs.yaml` | One database on ext4, XFS, btrfs, ZFS and tmpfs |
+| `scenarios/fs-jsonb.yaml` | One database layout on ext4, XFS, btrfs, ZFS and f2fs |
 | `scenarios/fs-norm.yaml` | The other database layout, on the same five filesystems |
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
