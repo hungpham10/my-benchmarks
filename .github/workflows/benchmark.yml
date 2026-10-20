@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Run only this scenario (empty = all of them)
+        description: Scenarios to run, comma separated (empty = all of them)
         type: string
         default: ''
       publish:
@@ -54,6 +54,9 @@ jobs:
           # not in the job's `if`: the matrix context is not available there,
           # because a job's condition is evaluated before the matrix is
           # expanded.
+          #
+          # A comma-separated list runs several scenarios at once, each on
+          # its own runner.
           WANT: ${{ inputs.scenario }}
         run: |
           pip install --quiet pyyaml
@@ -65,7 +68,8 @@ jobs:
 
           import yaml
 
-          want = os.environ.get("WANT", "").strip()
+          want = [w.strip() for w in os.environ.get("WANT", "").split(",")
+                  if w.strip()]
 
           entries = []
           for path in sorted(glob.glob("benchctl/scenarios/*.yaml")):
@@ -73,7 +77,7 @@ jobs:
                   s = yaml.safe_load(f)
               if not s or "id" not in s:
                   continue
-              if want and s["id"] != want:
+              if want and s["id"] not in want:
                   continue
               ci = s.get("ci") or {}
               entries.append({
@@ -94,7 +98,7 @@ jobs:
               })
 
           if not entries:
-              raise SystemExit(f"no scenario matched {want!r}")
+              raise SystemExit("no scenario matched: " + ", ".join(want))
 
           # The matrix travels as {"include": [...]}: that is the shape
           # GitHub accepts for a matrix built at run time. Anything else
