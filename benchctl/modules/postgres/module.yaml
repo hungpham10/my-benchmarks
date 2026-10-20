@@ -85,9 +85,10 @@ k6:
 # modules/postgres/observe.py.
 # query_marker is a SQL fragment that the verify check uses to narrow the
 # count to only the bench's queries (so we don't count VACUUM, PL/pgSQL,
-# or unrelated ad-hoc queries). For postgres, we filter by the table name
-# that appears in the rendered SQL.
-query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%'"
+# or unrelated ad-hoc queries). Every table the module loads has to be in
+# here: a table that is missing turns the k6 leg into "client sent 231,
+# server handled 0".
+query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%' OR query LIKE '%metrics_sharded%'"
 
 # observe.py exposes server_requests(filter_sql) and sample_stats(variant).
 requests_module: modules/postgres/observe.py

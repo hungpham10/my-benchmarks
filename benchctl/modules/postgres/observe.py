@@ -314,6 +314,35 @@ READ_SHAPES = {
 }
 
 
+def _plan_summary(plan):
+    """The part of an EXPLAIN plan that says how the work was spread.
+
+    Node types, the workers planned and the workers launched. A query that
+    says "Parallel Append, 3 workers" and a query that says "Seq Scan" are
+    different measurements even when they take the same time.
+    """
+    nodes = []
+    workers_planned = 0
+    workers_launched = 0
+
+    def walk(node):
+        nonlocal workers_planned, workers_launched
+        nodes.append(node.get("Node Type"))
+        if "Workers Planned" in node:
+            workers_planned = max(workers_planned, node["Workers Planned"])
+        if "Workers Launched" in node:
+            workers_launched = max(workers_launched, node["Workers Launched"])
+        for child in node.get("Plans", []):
+            walk(child)
+
+    walk(plan)
+    return {
+        "nodes": nodes,
+        "workers_planned": workers_planned,
+        "workers_launched": workers_launched,
+    }
+
+
 def readshapes(variant=None):
     """Measure the read shapes, warm or cold.
 
@@ -384,7 +413,8 @@ def qbench(variant=None):
     """
     import sys
     sys.path.insert(0, SHARED)
-    from querybench import run_all
+    from querybench import run_all, render_sql
+    import queries as Q
 
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
@@ -416,6 +446,11 @@ def qbench(variant=None):
         # comparison is not measured through a scheduler lottery; the
         # sharding scenario is the opposite case and needs the workers, so
         # it asks for them per session.
+        #
+        # The costs are zeroed too. PostgreSQL's planner will not choose a
+        # parallel plan for a query with a window function and a join on
+        # its own, and "the planner did not pick it" is a different
+        # experiment from "how well does it scale when it does".
         workers = os.environ.get("BENCHCTL_PARALLEL_WORKERS", "").strip()
         if workers:
             n = max(1, int(workers))
@@ -423,12 +458,29 @@ def qbench(variant=None):
             cur.execute(f"SET max_parallel_workers_per_gather = {n}")
             cur.execute(f"SET max_parallel_workers = {max(n, 8)}")
             cur.execute("SET min_parallel_table_scan_size = 0")
+            cur.execute("SET min_parallel_index_scan_size = 0")
+            cur.execute("SET parallel_setup_cost = 0")
+            cur.execute("SET parallel_tuple_cost = 0")
             cur.close()
 
         results = run_all(exec_fn, t_start_ms, t_end_ms, backend,
                           measure=int(os.environ.get("QBENCH_MEASURE", "30")),
                           max_budget_s=int(os.environ.get("QBENCH_BUDGET_S", "120")),
                           warmup=int(os.environ.get("QBENCH_WARMUP", "3")))
+
+        # The plan of the heaviest query, so the report can prove what the
+        # executor did: a Parallel Append with three workers is a different
+        # measurement from a serial scan, and the number has to be in the
+        # record rather than in a comment.
+        if workers:
+            q1 = next((q for q in Q.QUERIES if q["name"] == "q1_counter_rate"), None)
+            if q1:
+                sql = render_sql(q1["sql"][backend], t_start_ms, t_end_ms)
+                cur = conn.cursor()
+                cur.execute("EXPLAIN (FORMAT JSON) " + sql)
+                plan = cur.fetchone()[0][0]["Plan"]
+                cur.close()
+                results["q1_counter_rate"]["plan"] = _plan_summary(plan)
     finally:
         conn.close()
     print(json.dumps(results))

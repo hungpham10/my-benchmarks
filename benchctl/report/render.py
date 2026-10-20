@@ -160,23 +160,29 @@ def render_sharding(query_files):
         except ValueError:
             continue
         q1 = d.get("q1_counter_rate", {})
+        plan = q1.get("plan") or {}
         rows.append((n, q1.get("p50_ms"), q1.get("p95_ms"), q1.get("n"),
-                     q1.get("rows_matched")))
+                     plan.get("workers_launched"),
+                     "Parallel Append" in (plan.get("nodes") or [])))
     if not rows:
         return ""
     rows.sort()
     base = rows[0][1]
     out = ["## Sharding — One Query Over N Shards"]
-    out.append("| Shards | q1 p50 ms | q1 p95 ms | speedup | efficiency |")
-    out.append("|--------|-----------|-----------|---------|------------|")
-    for n, p50, p95, iters, _rows in rows:
+    out.append("| Shards | q1 p50 ms | q1 p95 ms | speedup | efficiency | "
+               "workers | parallel append |")
+    out.append("|--------|-----------|-----------|---------|------------|"
+               "---------|----------------|")
+    for n, p50, p95, iters, workers, parallel in rows:
         speedup = ""
         eff = ""
         if base and p50:
             speedup = f"{base / p50:.2f}x"
             eff = f"{base / p50 / n:.0%}"
         out.append(f"| {n} | {p50 if p50 is not None else 'n/a'} | "
-                   f"{p95 if p95 is not None else 'n/a'} | {speedup} | {eff} |")
+                   f"{p95 if p95 is not None else 'n/a'} | {speedup} | {eff} | "
+                   f"{workers if workers is not None else 'n/a'} | "
+                   f"{'yes' if parallel else 'no'} |")
     out.append("")
     out.append("Speedup is against one shard; efficiency is the speedup "
                "divided by the number of shards, so 100% means the extra "
@@ -210,7 +216,7 @@ def render_queries(query_files):
 
     # Collect query names from the first result (skip the metadata keys).
     first = next(iter(all_results.values()))
-    meta_keys = ("module", "fs", "run_id")
+    meta_keys = ("module", "fs", "run_id", "extra", "cache_dropped")
     query_names = [k for k in first.keys() if k not in meta_keys]
 
     # Build module list from actual result keys (not hardcoded wrong keys),

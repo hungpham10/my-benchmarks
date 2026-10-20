@@ -112,7 +112,23 @@ def check_continuity(min_points=10):
             return False, f"{slug}: step_latency_ms missing (module step never reported)"
         n = m.get("iterations", {}).get("values", {}).get("count", 0)
         if n < min_points:
-            return False, f"{slug}: only {n} latency samples (< {min_points}): curve is fiction"
+            # Few completed iterations mean one of two things: the ramp was
+            # too short (the curve is fiction), or the system could not
+            # keep up (the breaking point, which is the result). The
+            # second case shows up as a pile of dropped requests: k6
+            # wanted to send them and the server would not take them.
+            dropped = m.get("dropped_iterations", {})
+            if isinstance(dropped, list):
+                dropped = dropped[0] if dropped else {}
+            dropped_n = dropped.get("count", 0) if isinstance(dropped, dict) else 0
+            if dropped_n >= max(min_points, n):
+                details.append(
+                    f"{slug}: saturated — {n} completed, {dropped_n} dropped "
+                    f"(the server could not keep up; that is the breaking "
+                    f"point, not a broken curve)")
+                continue
+            return False, (f"{slug}: only {n} latency samples (< {min_points}) "
+                           f"and {dropped_n} dropped: curve is fiction")
         details.append(f"{slug}: {n} latency samples")
     return True, "; ".join(details)
 
