@@ -64,6 +64,11 @@ MOUNT_OPTS = {
 
 DEFAULT_SIZE_GB = 12
 
+# Space kept free next to the image for what the run itself writes: the
+# dataset, the WAL (max_wal_size), the docker layers and the container's
+# own copy of the data directory.
+RESERVE_BYTES = 6 * 1024 ** 3
+
 
 def parse_size(text):
     """Parse a docker-style size ('4G', '512M') into bytes.
@@ -160,6 +165,43 @@ def host_out(script):
 # paths
 # --------------------------------------------------------------------------
 
+def _best_host_dir():
+    """The machine's mount with the most free space, where we may write.
+
+    Inside a VM the root filesystem is often the *smallest* one: Colima
+    keeps docker's data on a separate volume, and a 12 GiB image plus a
+    database on a 19 GiB root is how a run dies with an I/O error instead
+    of an out-of-space error. Ask the machine which disk has room rather
+    than guessing from the outside.
+
+    Network shares are skipped on purpose: a loop device on virtiofs or 9p
+    has no O_DIRECT support, and the loop driver refuses to attach one.
+    """
+    skip = ("tmpfs", "devtmpfs", "squashfs", "overlay", "virtiofs", "9p",
+            "fuseblk", "fuse", "nfs", "cifs")
+    out = host_out(
+        "df -B1 --output=avail,fstype,target -x tmpfs -x devtmpfs -x squashfs "
+        "-x overlay 2>/dev/null | awk 'NR>1 {print $1, $2, $3}' | sort -rn | head -8")
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            avail = int(parts[0])
+        except ValueError:
+            continue
+        fstype, target = parts[1].strip(), parts[2].strip()
+        if fstype.lower() in skip or avail < RESERVE_BYTES:
+            continue
+        if not target.startswith("/"):
+            continue
+        probe = host_sh(f"mkdir -p {target}/.benchctl-probe && "
+                        f"rmdir {target}/.benchctl-probe", check=False)
+        if probe.returncode == 0:
+            return target
+    return None
+
+
 def resolve_root():
     """Where images and mount points live, on the daemon's machine.
 
@@ -172,6 +214,9 @@ def resolve_root():
         return env
     if backend() == "container" and sys.platform == "darwin":
         return os.path.join(os.path.expanduser("~"), "benchctl-fs")
+    best = _best_host_dir()
+    if best:
+        return f"{best}/benchctl-fs"
     for cand in ("/mnt/benchctl-fs", "/var/tmp/benchctl-fs"):
         parent = os.path.dirname(cand)
         if os.path.isdir(parent) and os.access(parent, os.W_OK):
@@ -245,6 +290,24 @@ def _mkfs_script(fs_type, device):
     raise FsError(f"unknown filesystem: {fs_type}")
 
 
+def free_bytes(path):
+    """Bytes available on the filesystem that will hold the image.
+
+    The path itself may not exist yet, so the nearest existing parent is
+    measured instead.
+    """
+    probe = path
+    for _ in range(4):
+        if host_sh(f"test -d {probe}", check=False).returncode == 0:
+            break
+        probe = os.path.dirname(probe) or "/"
+    out = host_out(f"df -B1 --output=avail {probe} 2>/dev/null | tail -1")
+    try:
+        return int(out.split()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
 def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
     """Format and mount a filesystem. Returns a state dict for the other calls.
 
@@ -260,6 +323,30 @@ def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
     data_dir = f"{mount}/data"
 
     host_sh(f"mkdir -p {root}/fs {root}/mnt")
+
+    # Space check before anything is created. The image file is sparse, so
+    # it only costs what the filesystem actually writes into it — but the
+    # data, the WAL and the docker layers all land on the same physical
+    # disk. Running out of space mid-load does not fail cleanly: the
+    # kernel returns EIO and the database dies with a signal, which looks
+    # like a database bug and not like a full disk.
+    have = free_bytes(root)
+    if have and have < RESERVE_BYTES:
+        raise FsError(
+            f"not enough space at {root}: {have / 1024 ** 3:.1f} GiB available, "
+            f"{RESERVE_BYTES / 1024 ** 3:.0f} GiB needed for the data, the WAL "
+            f"and docker. Point BENCHCTL_FS_ROOT at a bigger disk, or give the "
+            f"VM a bigger disk (colima start --disk N only applies when the VM "
+            f"is created — an existing VM keeps the disk it was created with).")
+    image_bytes = int(size_gb) * 1024 ** 3
+    if have and have < image_bytes + RESERVE_BYTES:
+        # Not fatal: the image is sparse and only grows with the data. It
+        # becomes fatal inside the filesystem if the data outgrows it, and
+        # that failure is legible ("No space left on device").
+        print(f"[fssetup] warning: {have / 1024 ** 3:.1f} GiB free at {root}, "
+              f"the image is {size_gb} GiB; the filesystem will fill up if the "
+              f"data grows past it", flush=True)
+
 
     # A crashed run can leave a mount and a loop device behind. Mounting on
     # top of a stale mount would hide it but leave it alive, and the data
