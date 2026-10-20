@@ -7,7 +7,7 @@ envelope:
   k6_memory: 1G
   k6_max_vus: 500
 
-# Filesystem matrix (scenarios/fs-matrix.yaml). The image file per
+# Filesystem loadtest (scenarios/fs.yaml). The image file per
 # filesystem is sparse, so size_gb is a ceiling, not an allocation.
 fs:
   size_gb: 12

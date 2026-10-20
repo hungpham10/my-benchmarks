@@ -237,6 +237,107 @@ def _read_dataset():
     return 45, 0, 0
 
 
+# Read shapes for the filesystem matrix.
+#
+# The q1-q5 suite cannot separate filesystems: q1 is a window function over
+# 3.6M rows and costs CPU, not I/O. These shapes are chosen for what they
+# make the storage layer do — a sequential scan of the whole table, one
+# metric's rows through the label index, and a single series (index lookup
+# plus a heap fetch). Each is a different mix of sequential reads, metadata
+# reads and random reads, which is exactly where filesystems differ.
+READ_SHAPES = {
+    "jsonb": {
+        "seq_scan": """
+            SELECT count(*), sum(value) FROM metrics_jsonb
+            WHERE time BETWEEN %s::timestamptz AND %s::timestamptz""",
+        "one_metric": """
+            SELECT count(*), sum(value) FROM metrics_jsonb
+            WHERE time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND labels @> '{"__name__":"queue_depth"}'""",
+        "one_series": """
+            SELECT count(*), sum(value) FROM metrics_jsonb
+            WHERE time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND labels @> '{"__name__":"queue_depth","instance":"host-0000"}'""",
+    },
+    "norm": {
+        "seq_scan": """
+            SELECT count(*), sum(m.value) FROM metrics_norm_brin m
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz""",
+        "one_metric": """
+            SELECT count(*), sum(m.value) FROM metrics_norm_brin m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
+        "one_series": """
+            SELECT count(*), sum(m.value) FROM metrics_norm_brin m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
+    },
+}
+
+
+def readshapes(variant=None):
+    """Measure the read shapes, warm or cold.
+
+    Warm (default): a few iterations per shape, the first one pays for the
+    cache miss and the rest read from it.
+
+    Cold (BENCHCTL_READSHAPES_COLD=1): exactly one iteration, no warmup.
+    The caller runs this right after restarting the container and dropping
+    the page cache, so the measurement is the disk's, not the cache's.
+    """
+    import sys
+    import time
+    sys.path.insert(0, SHARED)
+    from querybench import render_sql
+
+    if variant is None:
+        variant = os.environ.get("VARIANT", "jsonb")
+    if variant not in READ_SHAPES:
+        raise RuntimeError(f"unknown postgres variant: {variant!r} "
+                           f"(expected jsonb or norm)")
+
+    cold = os.environ.get("BENCHCTL_READSHAPES_COLD", "") == "1"
+    iterations = 1 if cold else int(os.environ.get("BENCHCTL_READSHAPES_ITER", "5"))
+    warmup = 0 if cold else 1
+
+    dsn = _rewrite_dsn(PG_DSN, PG_PORT)
+    conn = psycopg.connect(dsn, autocommit=True)
+    out = {}
+    try:
+        _, t_start_ms, t_end_ms = _read_dataset()
+        for name, sql in READ_SHAPES[variant].items():
+            text = render_sql(sql, t_start_ms, t_end_ms)
+            for _ in range(warmup):
+                cur = conn.cursor()
+                cur.execute(text)
+                cur.fetchall()
+                cur.close()
+            times = []
+            rows = 0
+            for _ in range(iterations):
+                cur = conn.cursor()
+                t0 = time.perf_counter()
+                cur.execute(text)
+                res = cur.fetchall()
+                times.append((time.perf_counter() - t0) * 1000.0)
+                rows = len(res)
+                cur.close()
+            times.sort()
+            out[name] = {
+                "n": len(times),
+                "cold": cold,
+                "rows": rows,
+                "p50_ms": round(times[len(times) // 2], 2),
+                "min_ms": round(times[0], 2),
+                "max_ms": round(times[-1], 2),
+            }
+    finally:
+        conn.close()
+    print(json.dumps(out))
+
+
 def qbench(variant=None):
     """Measure latency for each query in shared/queries.py via psycopg SQL.
 
@@ -273,7 +374,8 @@ def qbench(variant=None):
 
         results = run_all(exec_fn, t_start_ms, t_end_ms, backend,
                           measure=int(os.environ.get("QBENCH_MEASURE", "30")),
-                          max_budget_s=int(os.environ.get("QBENCH_BUDGET_S", "120")))
+                          max_budget_s=int(os.environ.get("QBENCH_BUDGET_S", "120")),
+                          warmup=int(os.environ.get("QBENCH_WARMUP", "3")))
     finally:
         conn.close()
     print(json.dumps(results))
@@ -288,6 +390,9 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "qbench":
         variant = sys.argv[2] if len(sys.argv) > 2 else None
         qbench(variant)
+    elif len(sys.argv) > 1 and sys.argv[1] == "readshapes":
+        variant = sys.argv[2] if len(sys.argv) > 2 else None
+        readshapes(variant)
     elif len(sys.argv) > 1 and sys.argv[1] == "io":
         print(json.dumps(io_stats()))
     else:

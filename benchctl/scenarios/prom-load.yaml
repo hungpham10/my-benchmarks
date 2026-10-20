@@ -1,4 +1,4 @@
-id: counter-rate
+id: prom-load
 systems: [prometheus]
 shape: counter
 scale: medium

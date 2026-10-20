@@ -1,35 +1,29 @@
 # benchctl pipeline.
 #
-# Three ways in, deliberately different:
+# One way in: workflow_dispatch. Nothing runs on a schedule and nothing runs
+# on a pull request — a benchmark that runs by itself spends the runner's
+# minutes on a result nobody asked for, and a nightly job that opens a PR
+# nobody reads is worse than no nightly job.
 #
-#   pull_request  smoke only (scenarios/smoke.yaml, ~2 min). Validates that a
-#                 change still runs end to end. A full run would make every PR
-#                 unusable.
-#   schedule      nightly full (scenarios/counter-rate.yaml), to catch upstream
-#                 drift in the `:latest` images.
-#   dispatch      manual, full by default, for a deliberate run.
+# The input is the name of a scenario file in benchctl/scenarios/. The name
+# in the dropdown is the file's base name, so "fs" means
+# benchctl/scenarios/fs.yaml. Adding a benchmark is a new yaml file plus one
+# line in the dropdown — the pipeline below does not change.
 #
-# The system under test is on `:latest`, so numbers describe whatever the tag
-# resolved to on the day. That is why the nightly run exists at all.
+# The system under test is on `:latest`, so the numbers describe whatever the
+# tag resolved to on the day of the run. That is why the run id and the image
+# digest travel with the results.
 
 name: benchmark
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/benchmark.yml'
-      - 'benchctl/**'
-  schedule:
-    # 03:17 UTC. Off the hour so it does not queue behind everyone else's
-    # midnight jobs.
-    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
-      scale:
-        description: Benchmark scale
+      scenario:
+        description: Scenario (benchctl/scenarios/<name>.yaml)
         type: choice
-        options: [smoke, load, pg, fs, full]
-        default: full
+        options: [prom-load, pg-load, fs]
+        default: prom-load
       publish:
         description: Open a PR with the results
         type: boolean
@@ -44,74 +38,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fs-smoke:
-    # The filesystem path is only exercised by the fs scenarios: it formats
-    # real filesystems on the runner's loop devices and bind-mounts them into
-    # the container's data directory. A PR check that skipped it would let
-    # that rot until a nightly run noticed. Separate job, separate runner,
-    # separate results/ — two scenarios in one results directory would have
-    # the parity check comparing datasets that were never meant to match.
-    #
-    # Skipped when the main job is already running the filesystem matrix:
-    # same code path, four times the data.
-    if: github.event_name != 'workflow_dispatch' || inputs.scale != 'fs'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    permissions:
-      contents: read
-
-    env:
-      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}-fssmoke
-
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-
-      - name: Install filesystem tools
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
-          sudo modprobe loop || true
-          sudo modprobe zfs || true
-
-      - name: Install driver deps
-        run: pip install numpy cramjam pyyaml 'psycopg[binary]'
-
-      - name: Run the filesystem smoke check
-        working-directory: benchctl
-        run: |
-          rm -rf results plan.json docker-compose.gen.yml compose.gen.json
-          mkdir -p results
-          python3 driver/run.py scenarios/fs-smoke.yaml
-          python3 verify/check.py
-
-      - name: Tear down
-        if: always()
-        run: |
-          sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
-          for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
-            sudo losetup -d "$dev" 2>/dev/null || true
-          done
-          sudo rm -rf /mnt/benchctl-fs 2>/dev/null || true
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fs-smoke-results-${{ github.run_number }}
-          path: benchctl/results/
-          if-no-files-found: error
-          retention-days: 90
-
   bench:
     runs-on: ubuntu-latest
-    # Full scale: up + init (3.6M samples) + k6 ramp (~14 min) + verify.
-    # load-test is ~10 min + init + verify. Keep 120 for safety.
+    # The longest scenario is fs: four legs, each with a bulk load, a query
+    # sweep, a load phase and a cold-cache phase. 120 minutes covers it with
+    # room for a slow runner.
     timeout-minutes: 120
 
     # No default working directory; steps specify their own
@@ -150,27 +81,18 @@ jobs:
           df -h "$RUNNER_TEMP" | tail -1
 
       - name: Select scenario
-        # A pull request never runs full, whatever the inputs say.
+        # The dropdown holds the base name of a file in benchctl/scenarios/.
+        # Fail loudly when the file is missing: a scenario that silently
+        # does not exist would run whatever is on disk.
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
-            echo "smoke (pull_request)"
-          elif [ "${{ inputs.scale }}" = "smoke" ]; then
-            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
-            echo "smoke (dispatch)"
-          elif [ "${{ inputs.scale }}" = "load" ]; then
-            echo 'SCENARIO=scenarios/load-test.yaml' >> "$GITHUB_ENV"
-            echo "load-test (dispatch)"
-          elif [ "${{ inputs.scale }}" = "pg" ]; then
-            echo 'SCENARIO=scenarios/load-test-pg.yaml' >> "$GITHUB_ENV"
-            echo "load-test-pg (dispatch)"
-          elif [ "${{ inputs.scale }}" = "fs" ]; then
-            echo 'SCENARIO=scenarios/fs-matrix.yaml' >> "$GITHUB_ENV"
-            echo "fs-matrix (dispatch)"
-          else
-            echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
-            echo "full"
+          SCENARIO="scenarios/${{ inputs.scenario }}.yaml"
+          if [ ! -f "$SCENARIO" ]; then
+            echo "::error::no such scenario file: $SCENARIO"
+            ls scenarios/ || true
+            exit 1
           fi
+          echo "SCENARIO=$SCENARIO" >> "$GITHUB_ENV"
+          echo "running $SCENARIO"
 
       - name: Install driver deps
         # The driver runs on the runner (not in a container): it generates
@@ -297,12 +219,12 @@ jobs:
               return;
             }
 
-            const scale = '${{ inputs.scale }}';
-            run(`git commit -m "bench: results from run ${{ github.run_number }} (${scale})"`);
+            const scenario = '${{ inputs.scenario }}';
+            run(`git commit -m "bench: results from run ${{ github.run_number }} (${scenario})"`);
             run(`git push --force origin ${branch}`);
 
             const body = [
-              `Automated results from run ${{ github.run_number }} (${scale} scale).`,
+              `Automated results from run ${{ github.run_number }} (${scenario} scenario).`,
               '',
               `Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
               '',
@@ -315,7 +237,7 @@ jobs:
               repo: context.repo.repo,
               base: base,
               head: branch,
-              title: `bench: results from run ${{ github.run_number }} (${scale})`,
+              title: `bench: results from run ${{ github.run_number }} (${scenario})`,
               body,
             });
             core.info(`Opened PR #${pr.number}: ${pr.html_url}`);

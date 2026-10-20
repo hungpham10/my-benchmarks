@@ -1,6 +1,6 @@
 """driver/run.py — the ONLY thing that generates text: plan.json + compose.
 
-Usage: python driver/run.py scenarios/counter-rate.yaml
+Usage: python driver/run.py scenarios/prom-load.yaml
 Pipeline per system: up -> init -> du disk -> k6 (ramp) -> verify -> down.
 
 Systems are "module" or "module/variant" (e.g. postgres/jsonb). The module
@@ -185,6 +185,10 @@ def gen_compose(module, cfg, mod_cfg, system, scenario, fs_state=None):
                               for k, v in dep["environment"].items()}
     if dep.get("healthcheck"):
         sut["healthcheck"] = dep["healthcheck"]
+    if dep.get("shm_size"):
+        # Docker's /dev/shm is 64 MB by default and counts against the
+        # container's memory limit.
+        sut["shm_size"] = dep["shm_size"]
 
     k6cfg = mod_cfg.get("k6", {})
     k6env = {
@@ -663,6 +667,24 @@ def main():
                   open(os.path.join(RESULTS, f"queries-{slug}.json"), "w"), indent=1)
         print(f"[benchctl] query sweep done: {len(qres)} queries", flush=True)
 
+        # Read shapes: the queries that make the filesystem do the work.
+        # A module opts in with `capabilities: [readshapes]`.
+        if "readshapes" in mod_cfg.get("capabilities", []):
+            print("[benchctl] read shapes (warm)", flush=True)
+            out = subprocess.run(
+                [sys.executable, f"modules/{module}/observe.py", "readshapes"],
+                cwd=ROOT, env={**os.environ, **qbench_env},
+                capture_output=True, text=True)
+            if out.returncode != 0:
+                print(out.stderr[-3000:])
+                raise RuntimeError("read shape bench failed")
+            rshapes = json.loads(out.stdout.strip().splitlines()[-1])
+            json.dump({"module": system, "fs": fs_type or "", "run_id": run_id,
+                       **rshapes},
+                      open(os.path.join(RESULTS, f"readshapes-{slug}.json"), "w"),
+                      indent=1)
+            print(f"[benchctl] read shapes done: {len(rshapes)} shapes", flush=True)
+
         # Second io snapshot: the difference between this one and the first is
         # what the read path cost.
         if fs_state:
@@ -848,6 +870,76 @@ def main():
         payload["k6_exit_code"] = int(r.returncode)
         json.dump(payload, open(os.path.join(RESULTS, f"disk-{slug}.json"),
                                 "w"), indent=1)
+
+        # Cold read phase. Restarting the container empties PostgreSQL's
+        # shared_buffers and dropping the page cache empties the host's.
+        # After that the read path has to go to the filesystem, which is the
+        # only measurement in this matrix where the filesystem is on the
+        # critical path: every other number here is served from RAM.
+        #
+        # It runs after the k6 leg on purpose. Restarting the SUT in the
+        # middle of the load phase would change what the load phase
+        # measures, and the server-request count has to be taken before
+        # these queries, or the k6 check would count them.
+        if fs_state:
+            def cold_reset():
+                """Empty both caches: the container's shared_buffers and the
+                host's page cache."""
+                sh("docker", "compose", "-f", "docker-compose.gen.yml",
+                   "restart", "-t", "60", "sut")
+                sh("docker", "compose", "-f", "docker-compose.gen.yml",
+                   "up", "-d", "--wait", "--wait-timeout", "180", "sut")
+                return fssetup.drop_caches()
+
+            print("[benchctl] cold phase: restarting the SUT, dropping caches",
+                  flush=True)
+            dropped = cold_reset()
+            print(f"[benchctl] page cache dropped: {dropped}", flush=True)
+
+            # The read shapes go first, and they get their own reset. A
+            # sequential scan warms the whole table, so measuring the query
+            # suite after it would measure a warm cache and call it cold.
+            if "readshapes" in mod_cfg.get("capabilities", []):
+                print("[benchctl] read shapes (cold)", flush=True)
+                out = subprocess.run(
+                    [sys.executable, f"modules/{module}/observe.py", "readshapes"],
+                    cwd=ROOT, env={**os.environ, **qbench_env,
+                                   "BENCHCTL_READSHAPES_COLD": "1"},
+                    capture_output=True, text=True)
+                if out.returncode != 0:
+                    print(out.stderr[-3000:])
+                    raise RuntimeError("cold read shape bench failed")
+                cold_r = json.loads(out.stdout.strip().splitlines()[-1])
+                json.dump({"module": system, "fs": fs_type, "run_id": run_id,
+                           "cache_dropped": dropped, **cold_r},
+                          open(os.path.join(RESULTS,
+                                            f"readshapes-cold-{slug}.json"), "w"),
+                          indent=1)
+
+            print("[benchctl] cold phase: resetting the caches again",
+                  flush=True)
+            dropped = cold_reset()
+            cold_env = {**qbench_env, "QBENCH_WARMUP": "0", "QBENCH_MEASURE": "1"}
+            print("[benchctl] query sweep (cold)", flush=True)
+            out = subprocess.run(
+                [sys.executable, f"modules/{module}/observe.py", "qbench"],
+                cwd=ROOT, env={**os.environ, **cold_env},
+                capture_output=True, text=True)
+            if out.returncode != 0:
+                print(out.stderr[-3000:])
+                raise RuntimeError("cold query bench failed")
+            cold_q = json.loads(out.stdout.strip().splitlines()[-1])
+            json.dump({"module": system, "fs": fs_type, "run_id": run_id,
+                       "cache_dropped": dropped, **cold_q},
+                      open(os.path.join(RESULTS, f"queries-cold-{slug}.json"), "w"),
+                      indent=1)
+
+            io_cold = collect_io(module, qbench_env)
+            io_path = os.path.join(RESULTS, f"io-{slug}.json")
+            io_payload = json.load(open(io_path))
+            io_payload["after_cold"] = io_cold
+            json.dump(io_payload, open(io_path, "w"), indent=1)
+            print("[benchctl] cold phase done", flush=True)
 
         sh("docker", "compose", "-f", "docker-compose.gen.yml", "down", "-v")
         if fs_state:

@@ -112,7 +112,23 @@ def _colima_running():
 
 
 def backend():
-    """Which backend runs commands on the machine that runs the daemon."""
+    """Which backend runs commands on the machine that runs the daemon.
+
+    Detected once and cached. The machine that runs the daemon does not
+    change in the middle of a run, and re-detecting it per call means a
+    busy VM can make the harness believe it is somewhere else — and then
+    run `sudo` on the developer's laptop instead of inside the VM.
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = _detect_backend()
+    return _BACKEND
+
+
+_BACKEND = None
+
+
+def _detect_backend():
     if os.environ.get("BENCHCTL_HOST_CMD"):
         return "explicit"
     if _in_container():
@@ -593,6 +609,23 @@ def fsync_bench_fio(mount_dir, seconds=5, size_mb=64):
         }
     except (KeyError, ValueError, IndexError) as e:
         return {"available": False, "reason": f"unparseable fio output: {e}"}
+
+
+def drop_caches():
+    """Drop the machine's page cache. Best effort; True when it worked.
+
+    The cold read phase needs the data directory's pages to be gone from
+    the host's cache, not only from PostgreSQL's shared_buffers. On Linux
+    that is /proc/sys/vm/drop_caches. There is no equivalent on macOS:
+    there the call goes to the Colima VM instead, and if that fails the
+    cold phase still runs with shared_buffers flushed — which is a weaker
+    claim, and the result records it as such.
+    """
+    p = host_sh(
+        "sync; if echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; "
+        "then echo dropped; else echo failed; fi",
+        check=False)
+    return (p.stdout or "").strip().endswith("dropped")
 
 
 def disk_usage(state):

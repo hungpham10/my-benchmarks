@@ -1,4 +1,4 @@
-id: load-test-pg
+id: pg-load
 systems: [prometheus, postgres/jsonb, postgres/norm]
 shape: counter
 scale: medium

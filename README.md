@@ -11,8 +11,8 @@ runnable by a reader who distrusts the number.
 
 | Benchmark | Question | Headline |
 | --- | --- | --- |
-| [prom-vs-postgres](benchctl/scenarios/counter-rate.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
-| [fs-matrix](benchctl/scenarios/fs-matrix.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database, four filesystems, everything else held constant |
+| [prom-vs-postgres](benchctl/scenarios/prom-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [fs](benchctl/scenarios/fs.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database, four filesystems, everything else held constant |
 
 Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
 one envelope, one set of rules about what a number has to be before it can be
@@ -22,23 +22,32 @@ published.
 
 ```sh
 cd benchctl
-make run SCENARIO=scenarios/counter-rate.yaml
+make run SCENARIO=scenarios/prom-load.yaml
 ```
 
 `make run` writes `results/report.md`. Scenarios are separately runnable
-because they are separately diagnosable.
+because they are separately diagnosable. The scenario files are the whole
+catalogue:
+
+| Scenario | What it measures |
+| --- | --- |
+| `scenarios/prom-load.yaml` | Prometheus under a ramping load, to its breaking point |
+| `scenarios/pg-load.yaml` | Prometheus and PostgreSQL side by side under the same ramp |
+| `scenarios/fs.yaml` | One database on ext4, XFS, btrfs and ZFS |
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
-`scale=smoke` finishes in about two minutes and checks that the harness still
-runs. `scale=full` takes roughly forty and regenerates `results/`.
-`scale=fs` runs the filesystem matrix: four filesystems, one database.
+The dropdown is the scenario: `prom-load` or `pg-load` takes about twenty
+minutes, `fs` runs the filesystem matrix — four filesystems, one database —
+in about an hour. Nothing runs on a schedule and nothing runs on a pull
+request; a benchmark that runs by itself spends the runner's minutes on a
+result nobody asked for.
 
 The harness also ships an optional monitoring stack: cAdvisor, a host exporter
 and both databases' own metrics feed a Grafana dashboard, so a run can be judged
 on what it cost the machine as well as how fast it was. See
 [Watching a run](benchctl/README.md#watching-a-run).
 
-## The filesystem matrix
+## The filesystem loadtest
 
 A container cannot format a filesystem, so the filesystem under test lives on
 the machine that runs the Docker daemon and the container bind-mounts a
@@ -63,6 +72,19 @@ Actions runner (`sudo` on the runner) and on a macOS box with Colima
 without its kernel module, for instance — is recorded as a gap in
 `results/fs-availability.json` and listed in the report, never silently
 dropped.
+
+### Reads are measured twice, warm and cold
+
+The dataset fits in RAM, so a warm read never reaches the filesystem and no
+read measurement can separate ext4 from ZFS. The scenario therefore runs the
+read path twice: once with the cache warm, and once after the container was
+restarted and the host's page cache dropped, when the read has to go to the
+disk. The cold numbers are the ones where the filesystem is on the critical
+path.
+
+The read shapes are chosen for what they make the storage layer do — a
+sequential scan of the whole table, one metric's rows through the label
+index, and a single series (one index lookup plus a heap fetch).
 
 ### The host needs the tools
 

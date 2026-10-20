@@ -381,12 +381,15 @@ def render_fs_syscalls(disk_files):
 
 
 def render_fs_read(disk_files, io_files, query_files, summaries):
-    """The read path: mostly the page cache, and that is the finding."""
+    """The read path: warm (cache) and cold (disk). The difference is the point."""
     ios = _fs_legs(disk_files, "io")
     queries = _fs_legs(disk_files, "queries")
+    colds = _fs_legs(disk_files, "queries-cold")
     out = ["## Filesystem Matrix — Read Path"]
-    out.append("| Filesystem | q1 p50 ms | q1 p95 ms | k6 p95 ms | PG read µs/op |")
-    out.append("|------------|-----------|-----------|------------|----------------|")
+    out.append("| Filesystem | q1 warm p50 ms | q1 cold ms | q5 warm p50 ms | "
+               "k6 p95 ms | PG read µs/op |")
+    out.append("|------------|-----------------|------------|----------------|"
+               "------------|----------------|")
     for f in sorted(disk_files):
         d = json.load(open(os.path.join(RESULTS, f)))
         fs = d.get("fs")
@@ -394,6 +397,8 @@ def render_fs_read(disk_files, io_files, query_files, summaries):
             continue
         q = queries.get(fs, {})
         q1 = q.get("q1_counter_rate", {})
+        q5 = q.get("q5_short_range", {})
+        cq = colds.get(fs, {}).get("q1_counter_rate", {})
         io = ios.get(fs, {}).get("after_read", {})
         slug = leg_slug(d["module"], fs)
         k6 = summaries.get(slug, {})
@@ -401,9 +406,44 @@ def render_fs_read(disk_files, io_files, query_files, summaries):
         dur = m.get("iteration_duration") or m.get("http_req_duration", {})
         vals = dur.get("values", {})
         out.append(
-            f"| {fs} | {q1.get('p50_ms', 'n/a')} | {q1.get('p95_ms', 'n/a')} | "
+            f"| {fs} | {q1.get('p50_ms', 'n/a')} | {cq.get('p50_ms', 'n/a')} | "
+            f"{q5.get('p50_ms', 'n/a')} | "
             f"{fmt_ms(vals.get('p(95)', 0)) if vals else 'n/a'} | "
             f"{io.get('read_us_avg', 'n/a')} |")
+    out.append("")
+    out.append("warm p50: the median of the measured iterations with the "
+               "cache warm. cold: one execution right after the container "
+               "restarted and the host page cache was dropped, so the "
+               "read had to reach the filesystem.")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_fs_readshapes(disk_files):
+    """The read shapes: what the filesystem does when the query is allowed
+    to touch the disk."""
+    warm = _fs_legs(disk_files, "readshapes")
+    cold = _fs_legs(disk_files, "readshapes-cold")
+    if not warm:
+        return ""
+    shapes = list(next(iter(warm.values())).keys())
+    out = ["## Filesystem Matrix — Read Shapes"]
+    out.append("| Shape | " + " | ".join(
+        f"{fs} warm / cold ms" for fs in sorted(warm)) + " |")
+    out.append("|-------|" + "|".join(["---------"] * len(warm)) + "|")
+    for shape in shapes:
+        cells = []
+        for fs in sorted(warm):
+            w = warm.get(fs, {}).get(shape, {})
+            c = cold.get(fs, {}).get(shape, {})
+            cells.append(f"{w.get('p50_ms', 'n/a')} / {c.get('p50_ms', 'n/a')}")
+        out.append(f"| {shape} | " + " | ".join(cells) + " |")
+    out.append("")
+    out.append("seq_scan reads the whole table; one_metric goes through the "
+               "label index for a single metric; one_series is one series, "
+               "one index lookup plus a heap fetch. warm / cold is the "
+               "median with the cache warm / the first execution after the "
+               "cache was dropped.")
     out.append("")
     return "\n".join(out)
 
@@ -422,9 +462,12 @@ def render_fs_caveats(fs_probes, availability=None):
     out.append("- The loop device runs with --direct-io=on, so the host page "
                "cache cannot absorb writes before they reach the disk. "
                "Without it, this would measure the host's cache.")
-    out.append("- The dataset is smaller than RAM. Reads are served from the "
-               "page cache, so the read path barely moves between "
-               "filesystems — that is a result, not a missing measurement.")
+    out.append("- The dataset is smaller than RAM. With a warm cache the read "
+               "path barely moves between filesystems — that is a result, "
+               "not a missing measurement. The cold column is the same "
+               "query after the container restarted and the host page cache "
+               "was dropped, which is where the filesystem is actually on "
+               "the critical path.")
     if "zfs" in fs_probes:
         out.append("- ZFS keeps its own cache (ARC) in host memory, capped at "
                    "the envelope size. It also writes in 128K records rather "
@@ -484,6 +527,7 @@ def main():
         lines.append(render_fs_write(disk_files, None, None))
         lines.append(render_fs_syscalls(disk_files))
         lines.append(render_fs_read(disk_files, None, None, summaries))
+        lines.append(render_fs_readshapes(disk_files))
         lines.append(render_fs_caveats(fs_probes, load("fs-availability.json") or None))
 
     with open(OUT, "w") as f:
