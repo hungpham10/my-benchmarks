@@ -85,6 +85,12 @@ jobs:
                   "artifact_days": int(ci.get("artifact_days") or 90),
                   # Filesystem scenarios need loop devices and mkfs tools.
                   "fs_tools": bool(ci.get("fs_tools")),
+                  # Which runner. GitHub-hosted runners come in fixed sizes
+                  # and the smallest is 4 vCPU / 16 GB; a self-hosted label
+                  # is the way to ask for something else. The measurement
+                  # does not depend on it: the SUT is capped by docker
+                  # limits, so the runner's spare cores stay idle.
+                  "runner": str(ci.get("runner") or "ubuntu-latest"),
               })
 
           if not entries:
@@ -105,7 +111,7 @@ jobs:
 
   bench:
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
     strategy:
