@@ -1,6 +1,9 @@
 name: pg-shard-fs-bench
 
 on:
+  push:
+    branches: ["feat/fs-matrix"]
+    paths: ["bench/pg-shard-fs/**", ".github/workflows/pg-shard-fs-bench.yml"]
   workflow_dispatch:
     inputs:
       rows:
