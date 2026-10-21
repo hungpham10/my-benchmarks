@@ -102,8 +102,11 @@ def init_modshard(cur, total, t_start_ms, t_end_ms, interval_s, window_min):
     """
     import hashlib
 
-    layout = os.environ.get("SHARD_LAYOUT", "B")
-    index_id = os.environ.get("SHARD_INDEX", "I1")
+    # Leg dimensions from the driver arrive uppercase with the leg's key
+    # name (LAYOUT, INDEX); SHARD_* names are the legacy/self-doc forms.
+    layout = (os.environ.get("LAYOUT") or os.environ.get("SHARD_LAYOUT") or "B")
+    index_id = (os.environ.get("INDEX") or os.environ.get("SHARD_INDEX")
+                or "I1")
     # SHARDS comes from a leg dimension (pg-shard-n.yaml), SHARD_N from the
     # scenario env; the leg wins so one scenario can sweep the count.
     n = int(os.environ.get("SHARDS") or os.environ.get("SHARD_N") or 32)
