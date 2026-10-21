@@ -12,7 +12,9 @@ runnable by a reader who distrusts the number.
 | Benchmark | Question | Headline |
 | --- | --- | --- |
 | [prom-vs-postgres](benchctl/scenarios/prom-vs-pg-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
-| [fs-jsonb](benchctl/scenarios/fs-jsonb.yaml) | Which filesystem should a PostgreSQL data directory live on? | One database layout, five filesystems, everything else held constant |
+| [pg-shard-models](benchctl/reports/2026-10-21-pg-user-model-fs.md) | User records: one table, pool-per-schema or table-suffix sharding? | Table sharding **+10%** writes; pool-per-schema buys isolation, not throughput; ranking zfs > ext4 > xfs ≈ btrfs on every model |
+| [pg-shard-scale](benchctl/reports/2026-10-21-pg-user-model-fs.md) | Does the sharding answer change at 50M/100M rows? | N-sweep curve per sharding model, routed reads included |
+| [pg-idxlab](benchctl/reports/2026-10-21-pg-user-model-fs.md) | BRIN / GiST / SP-GiST / hash / GIN-trigram: which index wins which case? | Write tax per access method + five read shapes across four filesystems |
 
 Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
 one envelope, one set of rules about what a number has to be before it can be
@@ -32,8 +34,10 @@ catalogue:
 | Scenario | What it measures |
 | --- | --- |
 | `scenarios/prom-vs-pg-load.yaml` | Prometheus and both PostgreSQL layouts under one ramp |
-| `scenarios/fs-jsonb.yaml` | One database layout on ext4, XFS, btrfs, ZFS and f2fs |
-| `scenarios/fs-norm.yaml` | The other database layout, on the same five filesystems |
+| `scenarios/pg-shard-models-<fs>.yaml` | User-schema sharding models (A/C/B) on one filesystem |
+| `scenarios/pg-shard-scale-<fs>.yaml` | Rows-scale sweep: 50M/100M × sharding model |
+| `scenarios/pg-shard-user.yaml` | Layout × payload-index mode (none/jsonb/gin) on ext4 |
+| `scenarios/pg-idxlab-<fs>.yaml` | Index access-method lab: build/maintenance/read shapes |
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
 It runs as a matrix — one runner per scenario — and the matrix is built by
@@ -41,9 +45,10 @@ reading `benchctl/scenarios/*.yaml`, so the scenario files are the only
 place a benchmark is declared. Each scenario's `ci` block says how long its
 job may run, how long its results are kept, and whether the runner needs
 the filesystem tooling. Run them all, or one: the *scenario* input takes a
-name, and an empty value means all of them. `prom-load` takes about twenty
-minutes, `pg-load` about thirty, `fs` runs the filesystem matrix — four
-filesystems, one database — in about an hour. Nothing runs on a schedule
+name, and an empty value means all of them. `pg-shard-user` takes about an
+hour, `pg-shard-models` about ninety minutes, and the FS-gear scenarios
+(`pg-idxlab`) a couple of hours because they build a fresh index over a fresh
+10M-row table on every leg. Nothing runs on a schedule
 and nothing runs on a pull request; a benchmark that runs by itself spends
 the runner's minutes on a result nobody asked for.
 
