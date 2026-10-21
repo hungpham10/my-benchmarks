@@ -133,7 +133,18 @@ def create_layout(conn, layout, n, index):
                     note text{extra_payload}{kind_gen}
                 )""")
         tables = physical_tables("C", n)
-    else:
+    elif layout in ("B", "D", "F"):
+        # N physical shard tables, routed by user_id %% N (the core layout)
+        for i in range(n):
+            q(conn, f"""
+                CREATE TABLE events_{i:02d} (
+                    id bigint primary key,
+                    user_id bigint not null,
+                    created_at timestamp not null,
+                    note text{extra_payload}{kind_gen}
+                )""")
+        tables = physical_tables("B", n)
+    else:  # layout A: single baseline table
         q(conn, f"""
             CREATE TABLE events (
                 id bigint primary key,
@@ -155,7 +166,8 @@ def create_layout(conn, layout, n, index):
 
     if layout == "F":
         for t in all_t:
-            q(conn, f"CREATE INDEX IF NOT EXISTS brin_ca_{t.split('.')[1]:02d} "
+            safe = t.replace(".", "_")
+            q(conn, f"CREATE INDEX IF NOT EXISTS brin_ca_{safe} "
                     f"ON {t} USING brin (created_at)")
 
     return meta
