@@ -98,6 +98,17 @@ Index build time shows the same filesystem effect more cleanly, because there is
 
 Same bytes written, 1.3–3.4× the time on zfs. If your platform team argues about filesystems for a week, this table is the argument: it changes the constant, not the architecture.
 
+Reads behave differently, and this is where the "zfs is fast" claim needs splitting:
+
+| Read (winning index) | ext4 | xfs | btrfs | zfs |
+|---|---|---|---|---|
+| BRIN range, warm p50 | 1.71 ms | 1.70 ms | 2.50 ms | **1.36 ms** |
+| BRIN range, cold p50 | — | 73.7 ms | 99.3 ms | **71.4 ms** |
+| full seq scan, cold | — | **3 103 ms** | 3 164 ms | 4 062 ms |
+| hash equality, warm p50 | 0.25 ms | 0.23 ms | 0.24 ms | **0.16 ms** |
+
+Warm, zfs has the lowest median on every indexed shape — but a *worse* p95 on three of four (ARC keeps the median low and the tail fat). Cold, it is level with xfs on indexed reads and slower on a full heap scan, because the measured ZFS properties are stock: recordsize 128K, compression off. None of this matters next to the routing gap below (seconds), which is why I do not recommend choosing a filesystem for point reads.
+
 ## 2. Sharding: what it buys and what it doesn't
 
 I expected table sharding to help writes. It didn't. At every size, 1 table vs 32 tables is within noise, and the reason is in the source: every commit ends in `XLogFlush` (`xlog.c:2780`), which takes the single instance-wide `WALWriteLock`; `ProcArrayEndTransaction` (`procarray.c:667`) takes `ProcArrayLock` exclusively per commit. Neither lock knows which table you wrote to. Splitting a table into 32 tables gives you 32 heaps and 32 btree roots — and exactly one fsync lane.

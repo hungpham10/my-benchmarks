@@ -62,9 +62,11 @@ throughput (its/s) — latency med/p95 ms in parentheses.
 ## Findings (answerable, not speculative)
 
 1. **zfs fastest everywhere** — against the raw fsync expectation.
-   recordsize=8k page (matches PG pages) + ARC metadata-heavy offload
-   means fewer full metadata rewrites per small commit than ext4/xfs
-   journaling path. Ranking holds for seed AND every model.
+   The measured ZFS properties are the stock ones: **recordsize 128K,
+   compression off** (`fs-zfs.json`; the harness sets no recordsize).
+   An earlier draft of this report claimed recordsize=8k — that was
+   wrong. Whatever the cause (ARC absorbing metadata, copy-on-write
+   batching), the ranking holds for the seed AND every model at 10M.
 2. **M2 (table-suffix) ≥ M0 (single table)** with the SAME 16-conn
    pool budget — 6 757 vs 6 157 on ext4 (+10%), 8 915 vs 8 862 on zfs.
    Page contention across 32 heaps beats one hot heap. Cheap win,

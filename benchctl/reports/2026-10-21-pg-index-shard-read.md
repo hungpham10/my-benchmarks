@@ -132,7 +132,41 @@ Two of these need a caveat rather than a headline:
 - `knn_point` is the cleanest result: GiST is 2 700× faster than the
   sort-based baseline, and 8× faster than SP-GiST's kNN.
 
-### 3.3 Write tax per index
+### 3.3 Read path by filesystem: warm and cold
+
+Warm p50 / p95 (ms) for each shape's winning leg:
+
+| Shape (leg) | ext4 | xfs | btrfs | zfs |
+|---|---|---|---|---|
+| range_time (brin) | 1.71 / 6.55 | 1.70 / 4.66 | 2.50 / 4.51 | **1.36 / 5.60** |
+| eq_rating (hash) | 0.25 / 1.00 | 0.23 / 1.01 | 0.24 / 1.00 | **0.16 / 1.45** |
+| knn_point (gist) | 0.42 / 1.30 | 0.41 / 1.24 | 0.59 / 1.23 | **0.31 / 1.78** |
+| prefix_name (spgist) | 0.25 / 0.77 | 0.22 / 0.83 | 0.22 / 0.72 | **0.14 / 1.02** |
+
+Cold reads (container restarted before the read, so the page cache is
+gone; xfs/btrfs/zfs only):
+
+| Shape | xfs | btrfs | zfs |
+|---|---|---|---|
+| BRIN range (index + one week of heap) | 73.7 ms | 99.3 ms | **71.4 ms** |
+| seq scan, 7-day range (no index) | **3 103 ms** | 3 164 ms | 4 062 ms |
+| kNN with GiST | 1 315 ms | 1 337 ms | **1 007 ms** |
+
+So the zfs read story is two-sided and does not match the write story:
+
+- **Warm, it is the fastest on every shape** (10–40% below xfs/ext4 p50),
+  but its p95 is *worse* on three of four shapes: ARC gives a lower
+  median and a fatter tail.
+- **Cold, it is on par with xfs for indexed reads** (71 ms vs 74 ms on
+  the BRIN range) and *slower* for a full sequential scan (4 062 ms vs
+  3 103 ms). With recordsize 128K and compression off (the measured
+  stock properties, `fs-zfs.json`), a 1.4 GB heap scan reads in larger
+  units and pays more per page.
+- Absolute differences here are milliseconds; the routing gap in §2
+  (seconds) is three orders larger. Do not pick a filesystem for
+  indexed point reads.
+
+### 3.4 Write tax per index
 
 Insert throughput of the 90s loop, relative to the `none` leg of the
 same FS (so FS speed cancels out).
