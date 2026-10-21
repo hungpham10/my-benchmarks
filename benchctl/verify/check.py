@@ -101,12 +101,13 @@ def check_parity():
     # dropped samples), while Postgres takes DISTINCT ON the true last row.
     # Even on identical samples the totals legitimately diverge. Failing on
     # this would fail the suite on engine semantics, not on data integrity.
+    sums = [v["sum"] for v in module_stats.values()]
     sum_min = min(s for s in sums if s > 0)
     sum_max = max(sums)
     ratio = sum_max / sum_min if sum_min else float("inf")
     print(f"[parity] sum ratio (diagnostic only, not a gate): {ratio:.2f}x")
 
-    return True, (f"parity ok: count={count_max} (within 2%); "
+    return True, (f"parity ok: counts within 2% per n_users group; "
                   f"sum ratio {ratio:.2f}x recorded as diagnostic only")
 
 
