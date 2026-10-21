@@ -560,27 +560,61 @@ def qbench(variant=None):
     # but run_all() looks up shared/queries.py by backend key.
     if variant == "userdb":
         # The user schema has no metrics catalog: run the bespoke read
-        # shapes instead (login / by_id / recent), timed the same way.
+        # shapes (login / by_id / recent), then — when a layout is in
+        # play — the ROUTED forms: the same point lookups against the
+        # one shard table the application's modulo routing would touch.
+        # That gap is the "does sharding help reads" answer.
         dsn = _rewrite_dsn(PG_DSN, PG_PORT)
         conn = psycopg.connect(dsn, autocommit=True)
-        results = {}
-        try:
+        measure = int(os.environ.get("QBENCH_MEASURE", "30"))
+
+        def timed(sql):
             cur = conn.cursor()
-            for name, sql in READ_SHAPES["userdb"].items():
-                samples = []
-                for _ in range(int(os.environ.get("QBENCH_MEASURE", "30"))):
+            samples = []
+            try:
+                for _ in range(measure):
                     t0 = time.perf_counter()
                     cur.execute(sql)
                     cur.fetchall()
                     samples.append((time.perf_counter() - t0) * 1000.0)
-                samples.sort()
-                p = lambda q: round(samples[min(len(samples) - 1,
-                                                int(len(samples) * q))], 2)
-                results[name] = {"p50_ms": p(0.5), "p95_ms": p(0.95),
-                                 "max_ms": round(samples[-1], 2),
-                                 "intent": f"userdb {name} read",
-                                 "winner_expected": "postgres"}
-            cur.close()
+            finally:
+                cur.close()
+            samples.sort()
+            p = lambda q: round(samples[min(len(samples) - 1,
+                                            int(len(samples) * q))], 2)
+            return {"p50_ms": p(0.5), "p95_ms": p(0.95),
+                    "max_ms": round(samples[-1], 2)}
+
+        layout = (os.environ.get("LAYOUT")
+                  or os.environ.get("SHARD_LAYOUT") or "")
+        pools = int(os.environ.get("POOLS") or 0)
+        shards = int(os.environ.get("SHARDS")
+                     or os.environ.get("SHARD_N") or 0)
+        n_users = int(os.environ.get("N_USERS") or "10000000")
+        try:
+            results = {}
+            for name, sql in READ_SHAPES["userdb"].items():
+                results[name] = timed(sql)
+
+            # Routed target: mirror step.js's routing exactly. C and
+            # POOLS legs are pool-per-schema (p = pools or shards); B is
+            # table-suffix with SHARDS tables.
+            routed_target = None
+            if layout == "C" or pools > 0:
+                routed_target = ("s{0:02d}.users", pools or shards or 32)
+            elif layout == "B":
+                routed_target = ("users_{0:02d}", shards or 0)
+            if routed_target:
+                fmt, modn = routed_target
+                uid = 1 + (n_users // 2)  # a mid-population user
+                table = fmt.format(uid % modn)
+                results["routed_target"] = table
+                results["routed_login"] = timed(
+                    "SELECT user_id, name FROM " + table
+                    + " WHERE email = 'user" + str(uid) + "@example.com' LIMIT 1")
+                results["routed_by_id"] = timed(
+                    "SELECT user_id, email, created_at FROM " + table
+                    + " WHERE user_id = " + str(uid) + " LIMIT 1")
         finally:
             conn.close()
         print(json.dumps(results))

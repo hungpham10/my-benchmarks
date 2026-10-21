@@ -538,7 +538,11 @@ def main():
                 print(f"[benchctl] === filesystem {fs_type} ===", flush=True)
                 fs_state = fssetup.provision(
                     fs_type,
-                    size_gb=cfg.get("fs", {}).get("size_gb", fssetup.DEFAULT_SIZE_GB),
+                    # Per-scenario override: scale scenarios fill 20-40 GB
+                    # of the sparse image, the default ceiling is 12.
+                    size_gb=(scenario.get("size_gb")
+                             or cfg.get("fs", {}).get("size_gb",
+                                                      fssetup.DEFAULT_SIZE_GB)),
                     arc_max_bytes=fssetup.parse_size(cfg["envelope"].get("memory", "")),
                 )
                 probe = fssetup.probe(fs_state)
