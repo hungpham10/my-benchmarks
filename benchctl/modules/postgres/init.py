@@ -137,10 +137,15 @@ def init_modshard(cur, total, t_start_ms, t_end_ms, interval_s, window_min):
         cur.execute("CREATE VIEW events_all AS "
                     "SELECT time, series_id, value FROM events")
     elif layout == "E":
+        # Identity columns are not supported on a partitioned parent, and
+        # the PK must include the partition key. (series_id, time) is the
+        # natural uniqueness here: one sample per series per interval.
         cur.execute(f"""
             CREATE TABLE events (
-                {cols},
-                PRIMARY KEY (series_id, id)
+                time timestamptz NOT NULL,
+                series_id bigint NOT NULL,
+                value double precision NOT NULL,
+                PRIMARY KEY (series_id, time)
             ) PARTITION BY HASH (series_id)""")
         for i in range(n):
             cur.execute(f"""
