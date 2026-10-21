@@ -29,9 +29,12 @@ const POOLS = parseInt(__ENV.POOLS || '0', 10);
 const INSERT_MODE = LAYOUT !== '' || POOLS > 0;
 
 function targetTable(uid, vuIdx) {
-  if (POOLS > 0) {
-    // M1: pool == schema, one users table per schema.
-    return 's' + String((vuIdx - 1) % POOLS).padStart(2, '0') + '.users';
+  if (POOLS > 0 || LAYOUT === 'C') {
+    // M1: pool == schema, one users table per schema. POOLS comes from
+    // pool-sweep legs; a plain C leg routes data by SHARDS.
+    const p = POOLS > 0 ? POOLS : SHARDS;
+    const shard = (vuIdx - 1) % p;
+    return 's' + String(shard).padStart(2, '0') + '.users';
   }
   if (LAYOUT === 'B') {
     // M2: table-suffix sharding, one pool.
