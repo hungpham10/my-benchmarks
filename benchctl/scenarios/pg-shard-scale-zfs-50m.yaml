@@ -1,11 +1,13 @@
 # Rows-scale sweep of the user shard question on ZFS — 50M only.
 #
 # The full pg-shard-scale-zfs scenario (50M + 100M, size_gb 100) was
-# killed after 3h58m with no artifact: the 100GB sparse image plus COW
-# on a stock recordsize=128K, compression=off pool most likely ran the
-# runner out of disk while seeding the 100M legs. This scenario keeps
-# only the 50M pair, which is enough to test whether ZFS keeps its 10M
-# lead at a size where the other three filesystems are already measured.
+# killed after 3h58m with no artifact. The runner log then reported
+# "No space left on device". Cause: the ZFS dataset ran with the stock
+# recordsize=128K while Postgres writes 8 KB pages, so every dirty page
+# became a read-modify-write of a 128K record (up to 16x amplification).
+# fssetup now creates the dataset with recordsize=8k, and this scenario
+# keeps only the 50M pair: enough to test whether ZFS holds its 10M lead
+# at a size where ext4/xfs/btrfs are already measured.
 # N (rows) and sharding are the two dimensions seeded here; the model is
 # the plan's strongest pair: baseline A (one table) vs M2/B (32 tables
 # routed user_id % 32, one pool). Everything runs as a closed loop
@@ -20,7 +22,7 @@
 #   3. where the per-connection inbox (fsync lane) dominates and extra
 #      rows stop costing anything.
 #
-# Storage: ~12 GB of data per leg; size_gb 70 leaves headroom for COW.
+# Storage: ~11.2 GB of data per leg; size_gb 45 leaves headroom for COW.
 
 id: pg-shard-scale-zfs-50m
 systems: [postgres/userdb]
@@ -50,7 +52,7 @@ env:
   QBENCH_MEASURE: "20"
   SHARD_N: "32"
 
-size_gb: 70
+size_gb: 45
 
 dataset:
   jobs: 20

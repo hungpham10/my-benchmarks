@@ -163,6 +163,22 @@ jobs:
           free -g | head -2
           df -h "$RUNNER_TEMP" | tail -1
 
+      - name: Free runner disk
+        # A stock ubuntu-latest image carries ~20 GB of toolchains this
+        # benchmark never uses, on a runner with ~82 GiB free. The zfs
+        # leg writes the same 11 GB of rows as the others but said yes to
+        # a 70 GiB image, and the runner died with "No space left on
+        # device" (Worker_*.log could not even be flushed). Clear the
+        # caches and unused SDKs before the filesystem image is created.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean
+          rm -rf "$HOME/.cache/pip" "$HOME/.cache/npm" 2>/dev/null || true
+          docker system prune -af 2>/dev/null || true
+          df -h "$RUNNER_TEMP" | tail -1
+
       - name: Check the scenario file
         # The matrix came from these files, but the job runs on a fresh
         # checkout of the same commit, so the check is cheap insurance

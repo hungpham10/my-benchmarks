@@ -497,8 +497,16 @@ def provision(fs_type, size_gb=DEFAULT_SIZE_GB, root=None, arc_max_bytes=None):
         if fs_type == "zfs":
             # ZFS is not a filesystem you mount directly: the pool owns the
             # device and the dataset is the filesystem inside it.
+            #
+            # recordsize=8k. Postgres writes 8 KB pages; with the stock
+            # 128 KB record ZFS does a read-modify-write of the whole
+            # record for every dirty page, i.e. up to 16x write
+            # amplification. Measured consequence: a 50M-row leg (11.2 GB
+            # logical) exhausted an 82 GiB runner and killed the job with
+            # "No space left on device". 8k is the standard PostgreSQL
+            # setting and the only fair configuration to compare.
             host_sh(f"zfs create -o mountpoint={mount} -o atime=off "
-                    f"-o compression=off benchfs/data")
+                    f"-o compression=off -o recordsize=8k benchfs/data")
             host_sh(f"zpool set autotrim=off benchfs 2>/dev/null || true")
             if arc_max_bytes:
                 # ZFS keeps its cache in host memory and will happily take
