@@ -85,8 +85,11 @@ function idxlabSql(uid) {
 export function step() {
   if (conn === undefined) {
     conn = sql.open(pgDriver, PG_DSN);
+    // Base 1e9: safely above every seeded population (10M..100M). The
+    // scale-sweep legs seed 50M/100M ids, where the old 50M base
+    // collided straight into the PK.
     uidBase[exec.vu.idInTest] =
-      50000000 + (exec.vu.idInTest - 1) * 100000000;
+      1000000000 + (exec.vu.idInTest - 1) * 100000000;
   }
   if (IDXLAB) {
     uidBase[exec.vu.idInTest] += 1;

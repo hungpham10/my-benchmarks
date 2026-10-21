@@ -507,7 +507,7 @@ def init_idxlab(cur):
         "hash_rating": "CREATE INDEX ix_rating ON docs USING hash (rating)",
         "gist_point": "CREATE INDEX ix_loc ON docs USING gist (loc)",
         "spgist_point": "CREATE INDEX ix_loc ON docs USING spgist (loc)",
-        "spgist_name": "CREATE INDEX ix_name ON docs USING spgist (name text_pattern_ops)",
+        "spgist_name": "CREATE INDEX ix_name ON docs USING spgist (name)",
         "gin_trgm": ("CREATE INDEX ix_name_trgm ON docs "
                      "USING gin (name gin_trgm_ops)"),
     }
