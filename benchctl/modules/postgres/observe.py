@@ -106,6 +106,14 @@ def sample_stats(variant=None):
         conn.close()
         return {"samples": count, "sum": float(count)}
 
+    # idxlab: parity is the docs row count itself (no sum side).
+    if variant == "idxlab":
+        cur.execute("SELECT count(*) FROM docs")
+        count = int(cur.fetchone()[0] or 0)
+        cur.close()
+        conn.close()
+        return {"samples": count, "sum": float(count)}
+
     if variant in ("norm", "sharded", "modshard"):
         table = ("metrics_norm_brin" if variant == "norm"
                  else "metrics_sharded" if variant == "sharded"
@@ -304,6 +312,30 @@ READ_SHAPES = {
             JOIN series_dim s ON s.id = m.series_id
             WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
               AND s.metric = 'queue_depth'""",
+    },
+    "idxlab": {
+        # Index-lab read shapes: each one is the case an access method
+        # claims as its own. All literals are fixed (no time-window
+        # substitution), so the plan stays comparable across legs.
+        #  - range_time: a 7-day window over a heap whose created_at is
+        #    insertion-ordered — BRIN's advertised case.
+        #  - eq_rating: ~100 rows of 10M — hash's only case.
+        #  - knn_point: ORDER BY <-> — GiST/SP-GiST only.
+        #  - prefix_name: LIKE 'User 1234%' — SP-GiST text vs nothing
+        #    (no btree(name) outside the btree_name leg).
+        #  - trgm_like: LIKE '%12345%' — pg_trgm GIN, unreachable to
+        #    the other index types.
+        "range_time": """
+            SELECT count(*) FROM docs
+            WHERE created_at BETWEEN '2025-06-01'::timestamptz
+                                 AND '2025-06-08'::timestamptz""",
+        "eq_rating": "SELECT count(*) FROM docs WHERE rating = 50000",
+        "knn_point": """
+            SELECT id FROM docs
+            ORDER BY loc <-> point(1234, 5678)
+            LIMIT 20""",
+        "prefix_name": "SELECT id FROM docs WHERE name LIKE 'User 1234%' LIMIT 100",
+        "trgm_like": "SELECT id FROM docs WHERE name LIKE '%12345%' LIMIT 100",
     },
     "userdb": {
         # Same three read shapes, on the user schema: point logins (the
@@ -558,12 +590,13 @@ def qbench(variant=None):
 
     # variant is "jsonb" | "norm" | "sharded" from driver (split_system),
     # but run_all() looks up shared/queries.py by backend key.
-    if variant == "userdb":
-        # The user schema has no metrics catalog: run the bespoke read
-        # shapes (login / by_id / recent), then — when a layout is in
-        # play — the ROUTED forms: the same point lookups against the
-        # one shard table the application's modulo routing would touch.
-        # That gap is the "does sharding help reads" answer.
+    if variant in ("userdb", "idxlab"):
+        # These schemas have no metrics catalog: run the bespoke read
+        # shapes instead. userdb additionally times the ROUTED forms —
+        # the same point lookups against the one shard table the
+        # application's modulo routing would touch. That gap is the
+        # "does sharding help reads" answer. idxlab's shapes are the
+        # access-method claim cases (range, equality, kNN, LIKE).
         dsn = _rewrite_dsn(PG_DSN, PG_PORT)
         conn = psycopg.connect(dsn, autocommit=True)
         measure = int(os.environ.get("QBENCH_MEASURE", "30"))
@@ -593,17 +626,18 @@ def qbench(variant=None):
         n_users = int(os.environ.get("N_USERS") or "10000000")
         try:
             results = {}
-            for name, sql in READ_SHAPES["userdb"].items():
+            for name, sql in READ_SHAPES[variant].items():
                 results[name] = timed(sql)
 
             # Routed target: mirror step.js's routing exactly. C and
             # POOLS legs are pool-per-schema (p = pools or shards); B is
-            # table-suffix with SHARDS tables.
+            # table-suffix with SHARDS tables. idxlab has no routing.
             routed_target = None
-            if layout == "C" or pools > 0:
-                routed_target = ("s{0:02d}.users", pools or shards or 32)
-            elif layout == "B":
-                routed_target = ("users_{0:02d}", shards or 0)
+            if variant == "userdb":
+                if layout == "C" or pools > 0:
+                    routed_target = ("s{0:02d}.users", pools or shards or 32)
+                elif layout == "B":
+                    routed_target = ("users_{0:02d}", shards or 0)
             if routed_target:
                 fmt, modn = routed_target
                 uid = 1 + (n_users // 2)  # a mid-population user

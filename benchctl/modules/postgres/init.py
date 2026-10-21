@@ -440,7 +440,105 @@ def init_userdb(cur):
             "requests": 1, "layout": layout, "mode": mode, "shard_n": n}
 
 
-def init(ahead_minutes=8):
+def init_idxlab(cur):
+    """Variant 'idxlab': one table, one index type per leg.
+
+    The userdb legs answer the layout question with btree everywhere.
+    This variant asks the INDEX question: given the same 10M-row table,
+    how does each access method change the write bill (bulk seed, index
+    build, transactional maintenance) and which one wins which read
+    shape? The columns are chosen so each AM has a case it claims:
+
+      id         bigint PK      btree (baseline, always present)
+      created_at timestamptz    BRIN vs btree range scans (monotonic
+                                with insertion order — the correlation
+                                BRIN needs)
+      rating     int            hash vs btree plain equality
+      loc        point          GiST vs SP-GiST kNN
+      name       text           SP-GiST text vs btree prefix LIKE
+      tags       text[]         GIN (array containment reference);
+
+    IX selects the extra index: none | btree_name | brin_time |
+    hash_rating | gist_point | spgist_point | spgist_name | gin_trgm.
+    The index is built AFTER the bulk seed so the build itself is a
+    measured number, and the k6 phase then pays per-statement
+    maintenance on the finished structure.
+    """
+    ix = os.environ.get("IX", "none")
+    total = int(os.environ.get("N_USERS") or "10000000")
+
+    cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    cur.execute("DROP TABLE IF EXISTS docs CASCADE")
+    cur.execute("""
+        CREATE TABLE docs (
+            id         bigint      NOT NULL,
+            created_at timestamptz NOT NULL,
+            rating     int         NOT NULL,
+            loc        point       NOT NULL,
+            name       text        NOT NULL,
+            tags       text[]      NOT NULL,
+            PRIMARY KEY (id)
+        )""")
+
+    print(f"[init] idxlab: ix={ix} rows={total}", flush=True)
+
+    # ---- bulk seed (server-side generate_series, synchronous_commit off
+    # for the same reason as userdb: fsync-per-commit is the k6 question)
+    cur.execute("SET synchronous_commit = off")
+    t0 = time.monotonic()
+    cur.execute(f"""
+        INSERT INTO docs (id, created_at, rating, loc, name, tags)
+        SELECT i,
+               '2020-01-01'::timestamptz + (i * interval '1 minute'),
+               mod(i, 100000),
+               point(mod(i, 10000), mod(i * 3, 10000)),
+               'User ' || i,
+               ARRAY['t' || mod(i, 25), 'tag' || mod(i, 7)]
+        FROM generate_series(1, {total}) g(i)
+    """)
+    seed_seconds = round(time.monotonic() - t0, 1)
+    cur.execute("SET synchronous_commit = on")
+
+    # ---- the index under test, built over the seeded table
+    builds = {
+        "none": "",
+        "btree_name": "CREATE INDEX ix_name ON docs (name)",
+        "brin_time": "CREATE INDEX ix_time ON docs USING brin (created_at)",
+        "hash_rating": "CREATE INDEX ix_rating ON docs USING hash (rating)",
+        "gist_point": "CREATE INDEX ix_loc ON docs USING gist (loc)",
+        "spgist_point": "CREATE INDEX ix_loc ON docs USING spgist (loc)",
+        "spgist_name": "CREATE INDEX ix_name ON docs USING spgist (name text_pattern_ops)",
+        "gin_trgm": ("CREATE INDEX ix_name_trgm ON docs "
+                     "USING gin (name gin_trgm_ops)"),
+    }
+    if ix not in builds:
+        raise SystemExit(f"unknown IX {ix!r}")
+    build_seconds = 0.0
+    if builds[ix]:
+        t0 = time.monotonic()
+        cur.execute(builds[ix])
+        build_seconds = round(time.monotonic() - t0, 1)
+
+    # Size of the table + the extra index: absolute bytes per index mode,
+    # independent of the leg's workload.
+    idx_rel = {"btree_name": "ix_name", "brin_time": "ix_time",
+               "hash_rating": "ix_rating", "gist_point": "ix_loc",
+               "spgist_point": "ix_loc", "spgist_name": "ix_name",
+               "gin_trgm": "ix_name_trgm"}.get(ix, "")
+    cur.execute("SELECT pg_total_relation_size('docs')")
+    doc_bytes = int(cur.fetchone()[0])
+    idx_bytes = 0
+    if idx_rel:
+        cur.execute(f"SELECT pg_relation_size('{idx_rel}')")
+        idx_bytes = int(cur.fetchone()[0])
+
+    seconds = seed_seconds
+    return {"samples": total, "seconds": seconds,
+            "samples_per_second": round(total / seconds, 1) if seconds > 0 else 0,
+            "index_build_seconds": build_seconds,
+            "docs_bytes": doc_bytes,
+            "index_bytes": idx_bytes,
+            "requests": 1, "ix": ix}
     """Load dataset into the SUT PostgreSQL.
 
     The driver has already:
@@ -561,6 +659,14 @@ def init(ahead_minutes=8):
     # ---- user-management variant: tiny rows, many small transactions --
     if variant == "userdb":
         res = init_userdb(cur)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return res
+
+    # ---- index-lab variant: one table, one access method per leg ------
+    if variant == "idxlab":
+        res = init_idxlab(cur)
         conn.commit()
         cur.close()
         conn.close()

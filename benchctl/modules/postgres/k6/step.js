@@ -26,7 +26,12 @@ const SHARDS = parseInt(__ENV.SHARDS || '32', 10);
 // VU i belongs to pool (i-1) % P, so P * CONNS VUs saturate the pools
 // the way the application's pool sizing would.
 const POOLS = parseInt(__ENV.POOLS || '0', 10);
-const INSERT_MODE = LAYOUT !== '' || POOLS > 0;
+// idxlab: the index-mode scenario. One INSERT per iteration against the
+// docs table — every access method on the table pays its own per-
+// transaction maintenance cost (hash overflow checks, GiST picksplit,
+// GIN pending list, BRIN summary updates) plus the shared WAL commit.
+const IDXLAB = __ENV.IDXLAB === '1';
+const INSERT_MODE = LAYOUT !== '' || POOLS > 0 || IDXLAB;
 
 function targetTable(uid, vuIdx) {
   if (POOLS > 0 || LAYOUT === 'C') {
@@ -66,11 +71,29 @@ function insertSql(uid, table) {
 const uidBase = [];
 let conn = undefined;
 
+// idxlab payload: a docs row covering every extended column the index
+// legs build on. rating uses a small modulus so an equality lookup
+// stays ~100 rows of 10M; loc maps into a known coordinate space.
+function idxlabSql(uid) {
+  return "INSERT INTO docs (id, created_at, rating, loc, name, tags) VALUES ("
+    + uid + ", now(), " + (uid % 100000)
+    + ", point(" + (uid % 10000) + ", " + ((uid * 3) % 10000) + ")"
+    + ", 'User " + uid + "', ARRAY['t" + (uid % 25)
+    + "','tag" + (uid % 7) + "'])";
+}
+
 export function step() {
   if (conn === undefined) {
     conn = sql.open(pgDriver, PG_DSN);
     uidBase[exec.vu.idInTest] =
       50000000 + (exec.vu.idInTest - 1) * 100000000;
+  }
+  if (IDXLAB) {
+    uidBase[exec.vu.idInTest] += 1;
+    const uid = uidBase[exec.vu.idInTest];
+    conn.query(idxlabSql(uid));
+    check(uid, { 'insert ok': (u) => u > 0 });
+    return true;
   }
   if (INSERT_MODE) {
     uidBase[exec.vu.idInTest] += 1;
