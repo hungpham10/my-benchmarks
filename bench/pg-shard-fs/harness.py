@@ -569,6 +569,9 @@ def main():
         q(conn, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
     except Exception:
         pass
+    if not args.skip_seed:
+        print("creating layout...", file=sys.stderr)
+        create_layout(conn, args.layout, args.shards, args.index)
     conn.close()
 
     if not args.skip_seed:
