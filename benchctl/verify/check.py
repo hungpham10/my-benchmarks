@@ -9,6 +9,7 @@ Four checks, each a test (fail = no report), not a comment:
 """
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.parse
@@ -76,14 +77,23 @@ def check_parity():
     # diagnostics but not compared exactly: PromQL instant-query evaluation
     # at a future `time=` can differ from Postgres's DISTINCT ON last-value
     # even when the underlying samples are identical.
-    counts = [v["count"] for v in module_stats.values()]
-    sums = [v["sum"] for v in module_stats.values()]
-    n_sys = len(counts)
-
-    # All counts must be within 2% of each other
-    count_min, count_max = min(counts), max(counts)
-    if count_min == 0 or count_max / count_min > 1.02:
-        return False, f"counts differ: {module_stats}"
+    #
+    # Legs that declare their own population (extra label carries
+    # n_users<digits>, e.g. the scale sweep's 50M/100M legs) are grouped by
+    # that population first: 50M and 100M legs differ BY DESIGN, and a
+    # cross-group comparison would fail on a valid run.
+    groups = {}
+    for key, v in module_stats.items():
+        m = re.search(r"n_users(\d+)", key)
+        groups[m.group(1) if m else ""] = groups.get(m.group(1) if m else "", [])
+        groups[m.group(1) if m else ""].append(v["count"])
+    for tag, counts in groups.items():
+        if not counts:
+            continue
+        count_min, count_max = min(counts), max(counts)
+        if count_min == 0 or count_max / count_min > 1.02:
+            return False, (f"counts differ (group {tag or 'default'}): "
+                           f"{module_stats}")
 
     # Sums are diagnostic only, never a pass/fail gate. The two engines do not
     # define "last value" the same way: Prometheus evaluates the instant query
