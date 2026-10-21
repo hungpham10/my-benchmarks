@@ -12,6 +12,7 @@ Both print JSON, last line.
 import json
 import os
 import sys
+import time
 from decimal import Decimal
 from urllib.parse import urlparse, urlunparse
 

@@ -1,0 +1,65 @@
+# Model x FS matrix leg: user schema on ZFS.
+#
+# The sharding-model x filesystem matrix, one filesystem per job. Four
+# models on the plain user schema (user_id unique, citext email, 3 small
+# indexes, 10M seeded rows):
+#   M0  baseline   - one table, one pool
+#   M1  schema     - P schemas x ONE users table each; user_id % P picks
+#                    the pool; the pool IS the schema; k6 VUs cap at
+#                    P * 16 so saturation happens at the pool
+#   M2  tables     - 32 tables users_XX in one schema, one pool;
+#                    user_id % 32 changes the table name instead
+#
+# Every model runs on THIS filesystem. The fsync-per-arrival question is
+# what makes the FS ranking model-dependent: each k6 arrival is one small
+# commit, measured directly against zfs (ARC capped by fssetup).
+#
+# Sibling scenarios: the same legs run on the other filesystems; the
+# index question (none / jsonb / gin) is pg-shard-user.yaml.
+
+id: pg-shard-models-zfs
+systems: [postgres/userdb]
+filesystems: [zfs]
+legs:
+  - {layout: A, mode: none, conns: 16}
+  - {layout: C, mode: none, pools: 8,  conns: 16}
+  - {layout: C, mode: none, pools: 32, conns: 16}
+  - {layout: B, mode: none, shards: 32, conns: 16}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 50
+  time_unit: 1s
+  stages:
+    - { target: 100, duration: 30s }
+    - { target: 300, duration: 1m }
+  graceful_ramp_down: 15s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 120
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "30"
+  SHARD_N: "32"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 160
+  artifact_days: 180
+  fs_tools: true

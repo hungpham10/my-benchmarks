@@ -148,11 +148,11 @@ def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None, extra=None):
         load["max_vus"] = min(env_max_vus, mod_max_vus)
     else:
         load["max_vus"] = env_max_vus
-    # Pool-per-schema legs size the client to exactly P * conns VUs: one
-    # connection per VU, VU i talking to pool i % P. The cap IS the
-    # measurement (pool saturation is what an arrival rate collides with).
-    if extra and extra.get("pools"):
-        cap = int(extra["pools"]) * int(extra.get("conns", 16))
+    # Pool sizing legs (conns) cap the VU budget to P * conns for pool
+    # legs (P schemas), and to 1 * conns for table-suffix legs. The cap
+    # IS the measurement: saturation happens at the pool, not arrivals.
+    if extra and extra.get("conns"):
+        cap = int(extra.get("pools", 1)) * int(extra["conns"])
         load["max_vus"] = min(load["max_vus"], cap)
 
     return {
