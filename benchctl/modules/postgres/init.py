@@ -313,6 +313,7 @@ def init_userdb(cur):
     pools = int(os.environ.get("POOLS") or n)
     total = int(os.environ.get("N_USERS") or "10000000")
 
+    cur.execute("CREATE EXTENSION IF NOT EXISTS citext")
     cur.execute("DROP TABLE IF EXISTS users CASCADE")
     cur.execute("DROP VIEW IF EXISTS users_all CASCADE")
     cur.execute("DROP SCHEMA IF EXISTS s00, s01, s02, s03, s04, s05, s06, s07 CASCADE")
