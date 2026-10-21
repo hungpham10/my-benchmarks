@@ -250,3 +250,5 @@ My interview answer was half right. Disk and `rate()` were worse on Postgres, as
 - I measured no CPU or RAM, and used `latest` images without recording digests.
 
 The full code is in `benchctl/` at `github.com/hungpham10/my-benchmarks`; the numbers come from run `gh-232.1`.
+
+*Follow-up: the same Head of Platform asked why the **application** database crawls. I benchmarked the filesystem, the sharding model and eight index types — [read it here](/blog/postgres-sharding-index-filesystem).*
