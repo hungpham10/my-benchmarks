@@ -101,7 +101,13 @@ def run_all(exec_fn, t_start_ms, t_end_ms, backend, measure=30, max_budget_s=120
         if backend == "prometheus":
             text = q["promql"]
         else:
-            text = render_sql(q["sql"][backend], q_start_ms, t_end_ms)
+            sql = q["sql"].get(backend)
+            if sql is None:
+                # Read-contract alias: events_all reuses the norm SQL with
+                # the table name swapped (see driver run.py TABLE_ALIASES).
+                base = "metrics_norm_brin"
+                sql = q["sql"][base].replace(base, backend)
+            text = render_sql(sql, q_start_ms, t_end_ms)
 
         def make_exec(text=text):
             def f():

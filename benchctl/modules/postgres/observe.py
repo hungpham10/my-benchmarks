@@ -531,7 +531,8 @@ def qbench(variant=None):
     # but run_all() looks up shared/queries.py by backend key.
     VARIANT_TO_BACKEND = {"jsonb": "metrics_jsonb",
                            "norm": "metrics_norm_brin",
-                           "sharded": "metrics_sharded"}
+                           "sharded": "metrics_sharded",
+                           "modshard": "events_all"}
     if variant not in VARIANT_TO_BACKEND:
         raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb, norm, sharded or modshard)")
     backend = VARIANT_TO_BACKEND[variant]
@@ -563,7 +564,10 @@ def qbench(variant=None):
         if workers:
             q1 = next((q for q in Q.QUERIES if q["name"] == "q1_counter_rate"), None)
             if q1:
-                sql = render_sql(q1["sql"][backend], t_start_ms, t_end_ms)
+                sql = q1["sql"].get(backend) or \
+                    q1["sql"]["metrics_norm_brin"].replace(
+                        "metrics_norm_brin", backend)
+                sql = render_sql(sql, t_start_ms, t_end_ms)
                 results["q1_counter_rate"]["plan"] = _explain(conn, sql)
     finally:
         conn.close()
