@@ -12,6 +12,19 @@ const plan = JSON.parse(open('../../../plan.json'));
 const QUERY = __ENV.K6_QUERY || plan.query;  // rendered SQL from scenario
 const PG_DSN = __ENV.PG_DSN || 'postgres://bench:bench@sut:5432/bench?sslmode=disable';
 
+// Read-side randomisation must happen HERE, not in SQL. `random()` in a
+// WHERE clause is volatile, and a volatile expression is not a
+// pseudo-constant, so PostgreSQL cannot use an index for it — every
+// "point lookup" silently becomes a seq scan with LIMIT 1. Measured
+// cost of that mistake: ~5s per login instead of ~0.1ms. Substituting
+// the number client-side keeps the SQL literal and the index usable.
+const UID_MAX = parseInt(__ENV.K6_UID_MAX || '9999999', 10);
+function materialize(q) {
+  if (q.indexOf('__UID__') === -1) return q;
+  return q.split('__UID__').join(
+    String(1 + Math.floor(Math.random() * UID_MAX)));
+}
+
 // ---- userdb insert mode ------------------------------------------------
 // When the scenario's leg carries a LAYOUT/POOLS dimension, this step
 // becomes a registration transaction instead of a rendered SELECT: one
@@ -107,7 +120,7 @@ export function step() {
     check(uid, { 'insert ok': (u) => u > 0 });
     return true;
   }
-  const result = conn.query(QUERY);
+  const result = conn.query(materialize(QUERY));
   check(result, { 'query ok': (r) => r.length >= 0 });
   return true;
 }

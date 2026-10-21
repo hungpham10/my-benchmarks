@@ -196,15 +196,18 @@ QUERIES.extend([
         "winner": "postgres",
         "promql": "",
         "sql": {
-            # The ::citext cast is load-bearing. citext -> text is an
-            # IMPLICIT cast (contrib/citext/citext--1.4.sql:83) while
-            # text -> citext is only ASSIGNMENT, so `email = <text expr>`
-            # resolves to text = text and cannot use the citext index.
-            # Without the cast every login is a seq scan.
+            # `__UID__` is substituted by k6 before the statement is sent
+            # (step.js materialize()). It must NOT be random() in SQL:
+            # random() is volatile, a volatile qual is not a
+            # pseudo-constant, and the planner therefore refuses the
+            # index — the measured result was a 5s seq scan per login.
+            # The ::citext cast is also load-bearing: citext -> text is
+            # IMPLICIT (contrib/citext/citext--1.4.sql:83) while
+            # text -> citext is only ASSIGNMENT, so an uncast text
+            # expression compares as text = text and misses the index.
             "users_all": """
                 SELECT user_id, name FROM users_all
-                WHERE email = ('user' || ((1 + (random() * 9999999)::int)::text)
-                      || '@example.com')::citext
+                WHERE email = ('user' || __UID__ || '@example.com')::citext
                 LIMIT 1""",
         },
     },
@@ -216,7 +219,7 @@ QUERIES.extend([
         "sql": {
             "users_all": """
                 SELECT user_id, email, created_at FROM users_all
-                WHERE user_id = 1 + (random() * 9999999)::int
+                WHERE user_id = __UID__
                 LIMIT 1""",
         },
     },
@@ -227,8 +230,12 @@ QUERIES.extend([
         "winner": "postgres",
         "promql": "",
         "sql": {
+            # sum(user_id) forces heap access. count(*) alone can be
+            # answered by an index-only scan on created_at, which barely
+            # parallelises — the first scan run measured no worker gain
+            # for exactly that reason.
             "users_all": """
-                SELECT count(*) FROM users_all
+                SELECT sum(user_id) FROM users_all
                 WHERE created_at > now() - interval '365 days'""",
         },
     },
