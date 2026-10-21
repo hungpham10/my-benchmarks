@@ -44,18 +44,21 @@ function targetTable(uid, vuIdx) {
 }
 
 function insertSql(uid, table) {
-  const payload = MODE === 'none' ? '' : (
-    ', jsonb_build_object('
+  const cols = '(user_id, email, name, created_at'
+    + (MODE === 'none' ? ')' : ', payload)');
+  if (MODE === 'none') {
+    return 'INSERT INTO ' + table + ' ' + cols + ' VALUES ('
+      + uid + ", 'user" + uid + "@signup.example.com', 'User " + uid
+      + "', now())";
+  }
+  const payload = 'jsonb_build_object('
     + "'tier', 'tier_' || (" + (uid % 5) + ' + 1), '
     + "'tags', to_jsonb(array['alpha','beta','gamma']), "
     + "'attrs', jsonb_build_object('blob', repeat(md5(" + uid
-    + "::text), (CASE WHEN " + (uid % 10) + ' < 3 THEN 40 ELSE 16 END))))'
-  );
-  const cols = '(user_id, email, name, created_at'
-    + (MODE === 'none' ? ')' : ', payload)');
+    + "::text), (CASE WHEN " + (uid % 10) + " < 3 THEN 40 ELSE 16 END))))";
   return 'INSERT INTO ' + table + ' ' + cols + ' VALUES ('
     + uid + ", 'user" + uid + "@signup.example.com', 'User " + uid
-    + "', now()" + (MODE === 'none' ? ')' : (', ' + payload + ')'));
+    + "', now(), " + payload + ')';
 }
 
 // One disjoint user_id range per VU: no PK collisions across VUs, and
