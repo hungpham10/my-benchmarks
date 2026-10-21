@@ -499,6 +499,15 @@ def init_idxlab(cur):
     seed_seconds = round(time.monotonic() - t0, 1)
     cur.execute("SET synchronous_commit = on")
 
+    # ANALYZE before anything reads: the bulk seed does not update
+    # pg_statistic, and a planner running on empty stats picks plans
+    # per cache state — the first idxlab read sweep showed range_time
+    # flipping 1.3ms to 5.5s between filesystems for exactly this
+    # reason. The ANALYZE itself is not part of the measured seed.
+    t0 = time.monotonic()
+    cur.execute("ANALYZE docs")
+    analyze_seconds = round(time.monotonic() - t0, 1)
+
     # ---- the index under test, built over the seeded table
     builds = {
         "none": "",
@@ -536,6 +545,7 @@ def init_idxlab(cur):
     return {"samples": total, "seconds": seconds,
             "samples_per_second": round(total / seconds, 1) if seconds > 0 else 0,
             "index_build_seconds": build_seconds,
+            "analyze_seconds": analyze_seconds,
             "docs_bytes": doc_bytes,
             "index_bytes": idx_bytes,
             "requests": 1, "ix": ix}
