@@ -111,10 +111,11 @@ def create_layout(conn, layout, n, index):
     if layout == "E":
         q(conn, f"""
             CREATE TABLE events (
-                id bigint primary key,
+                id bigint,
                 user_id bigint not null,
                 created_at timestamp not null,
-                note text{extra_payload}{kind_gen}
+                note text{extra_payload}{kind_gen},
+                PRIMARY KEY (user_id, id)   -- partition key must be in PK
             ) PARTITION BY HASH (user_id)""")
         for i in range(n):
             q(conn, f"CREATE TABLE events_p{i} PARTITION OF events "
@@ -228,7 +229,7 @@ def seed_worker(dsn, layout, n, total, start, end):
     q(conn, """
         INSERT INTO events (id, user_id, created_at, note)
         SELECT i, i,
-               timestamp '2026-01-01' + (i %% ('30 days')::interval),
+               timestamp '2026-01-01' + ((i %% 30) * interval '1 day'),
                repeat(md5(i::text), 3)
         FROM generate_series(%(s)s, %(e)s) g(i)
     """, {"s": start, "e": end})
@@ -273,7 +274,7 @@ def seed(dsn, layout, n, total, workers):
             q(c, f"""
                 INSERT INTO {tname} ({base_cols})
                 SELECT i, i,
-                       timestamp '2026-01-01' + (i %% ('30 days')::interval),
+                       timestamp '2026-01-01' + ((i %% 30) * interval '1 day'),
                        repeat(md5(i::text), (1800 / 32) + 1){payload_sel_sql}
                 FROM generate_series(1, %(e)s) g(i)
                 WHERE i %% {n} = %(sh)s
