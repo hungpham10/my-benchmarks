@@ -369,7 +369,14 @@ def init_userdb(cur):
                 created_at timestamptz NOT NULL DEFAULT now(){payload_col},
                 PRIMARY KEY (user_id)
             ) PARTITION BY HASH (user_id)""")
-        cur.execute("CREATE UNIQUE INDEX uq_email_users ON users (email)")
+        # A declared-hash partitioned table cannot enforce a global
+        # unique(e-mail): every unique index must include the partition
+        # key. (email, user_id) is the closest legal form; it guarantees
+        # one row per (user_id, email) — the "log in with the same email
+        # on two shards" hole is a REAL architectural cost of this
+        # layout and the report says so, instead of hiding it.
+        cur.execute("CREATE UNIQUE INDEX uq_email_users "
+                    "ON users (email, user_id)")
         cur.execute("CREATE INDEX ix_created_users ON users (created_at)")
         if mode == "gin":
             cur.execute("CREATE INDEX gin_prof_users ON users "
