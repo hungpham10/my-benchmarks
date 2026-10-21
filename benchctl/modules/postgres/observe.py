@@ -93,8 +93,12 @@ def sample_stats(variant=None):
     if variant is None:
         variant = os.environ.get("VARIANT", "jsonb")
 
-    if variant in ("norm", "sharded"):
-        table = "metrics_norm_brin" if variant == "norm" else "metrics_sharded"
+    # modshard: physical layout differs, but the read contract is the same
+    # VIEW (time, series_id, value) over the UNION of all shards.
+    if variant in ("norm", "sharded", "modshard"):
+        table = ("metrics_norm_brin" if variant == "norm"
+                 else "metrics_sharded" if variant == "sharded"
+                 else "events_all")
         # Count all rows
         cur.execute(f"SELECT count(*) FROM {table}")
         count = int(cur.fetchone()[0] or 0)
@@ -290,6 +294,33 @@ READ_SHAPES = {
             WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
               AND s.metric = 'queue_depth'""",
     },
+    "modshard": {
+        # Same shapes as norm, but over the events_all view: the UNION ALL
+        # of every physical shard in the leg's layout. For layout B the
+        # view text itself carries the N-table UNION cost — an honest part
+        # of the app-side sharding read path.
+        "seq_scan": """
+            SELECT count(*), sum(m.value) FROM events_all m
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz""",
+        "one_metric": """
+            SELECT count(*), sum(m.value) FROM events_all m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
+        "one_series": """
+            SELECT count(*), sum(m.value) FROM events_all m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
+        # A median over every sample of one metric: the sort spills to a
+        # temp file in PGDATA, on the filesystem under test.
+        "temp_sort": """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY m.value)
+            FROM events_all m
+            JOIN series_dim s ON s.id = m.series_id
+            WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+              AND s.metric = 'queue_depth'""",
+    },
     "sharded": {
         # The scan that answers the sharding question, and the same scan
         # without sum(float8).
@@ -426,7 +457,7 @@ def readshapes(variant=None):
         variant = os.environ.get("VARIANT", "jsonb")
     if variant not in READ_SHAPES:
         raise RuntimeError(f"unknown postgres variant: {variant!r} "
-                           f"(expected jsonb or norm)")
+                           f"(expected jsonb, norm, sharded or modshard)")
 
     cold = os.environ.get("BENCHCTL_READSHAPES_COLD", "") == "1"
     iterations = 1 if cold else int(os.environ.get("BENCHCTL_READSHAPES_ITER", "5"))
@@ -502,7 +533,7 @@ def qbench(variant=None):
                            "norm": "metrics_norm_brin",
                            "sharded": "metrics_sharded"}
     if variant not in VARIANT_TO_BACKEND:
-        raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb or norm)")
+        raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb, norm, sharded or modshard)")
     backend = VARIANT_TO_BACKEND[variant]
 
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)

@@ -94,6 +94,12 @@ def split_system(entry):
     return entry, None
 
 
+# Read-contract aliases. A variant whose read side keys off a VIEW instead
+# of a catalog table maps here: the catalog SQL is reused with the base
+# table's name swapped for the alias.
+TABLE_ALIASES = {"events_all": "metrics_norm_brin"}
+
+
 def render_query(system, scenario):
     """The query for this leg. A plain string is used as-is (promql); a
     {query, table} mapping is rendered from the old query catalog with the
@@ -115,7 +121,15 @@ def render_query(system, scenario):
     manifest = json.load(open(os.path.join(RESULTS, "dataset.json")))
     for q in Q.QUERIES:
         if q["name"] == spec["query"]:
-            sql = q["sql"][spec["table"]]
+            tbl = spec["table"]
+            sql = q["sql"].get(tbl)
+            if sql is None:
+                base = TABLE_ALIASES.get(tbl)
+                if base and base in q["sql"]:
+                    sql = q["sql"][base].replace(base, tbl)
+            if sql is None:
+                raise RuntimeError(
+                    f"query {spec['query']} has no SQL for table {tbl}")
             out = sql.replace("%s", _ts_literal(manifest["t_start_ms"]), 1)
             out = out.replace("%s", _ts_literal(manifest["t_end_ms"]), 1)
             assert "%s" not in out, "unrendered placeholder in " + spec["query"]

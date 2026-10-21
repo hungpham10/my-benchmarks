@@ -88,7 +88,7 @@ k6:
 # or unrelated ad-hoc queries). Every table the module loads has to be in
 # here: a table that is missing turns the k6 leg into "client sent 231,
 # server handled 0".
-query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%' OR query LIKE '%metrics_sharded%'"
+query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%' OR query LIKE '%metrics_sharded%' OR query LIKE '%events%'"
 
 # observe.py exposes server_requests(filter_sql) and sample_stats(variant).
 requests_module: modules/postgres/observe.py

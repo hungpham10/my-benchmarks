@@ -1,0 +1,71 @@
+# The filesystem matrix under the modulo-sharding write path.
+#
+# fs-jsonb.yaml answers "where should a PostgreSQL data directory live"
+# with the standard metrics tables. This scenario re-asks it with the
+# layout the application-side sharding study settled on (layout B: N
+# physical tables routed by user_id % N, plus the GIN win — layout D with
+# jsonb_path_ops and fastupdate off), because the fs question and the
+# sharding question interact: N shards means N relfilenodes + N TOAST
+# forks touching the same filesystem, and GIN pending-list flushes add
+# small writes on top.
+#
+# Legs: B-I1 (plain indexes) and D-I4 (jsonb + tuned GIN) x 4 filesystems.
+# If D-I4's ranking differs from B-I1's, the fs answer is workload-shaped
+# — which is worth knowing before the production deployment.
+#
+# Everything else is the fs-jsonb recipe: loop devices via shared/fssetup,
+# --direct-io=on, ARC-capped ZFS, the same dataset and envelope.
+
+id: pg-shard-fs
+systems: [postgres/modshard]
+filesystems: [ext4, xfs, btrfs, zfs]
+shape: counter
+scale: medium
+
+legs:
+  - {layout: B, index: I1}
+  - {layout: D, index: I4}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  stages:
+    - { target: 10,  duration: 30s }
+    - { target: 200, duration: 1m }
+  graceful_ramp_down: 15s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 90
+
+env:
+  QBENCH_MEASURE: "10"
+  QBENCH_BUDGET_S: "45"
+  SHARD_N: "32"
+  BENCHCTL_PARALLEL_WORKERS: "4"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  postgres/modshard:
+    query: q1_counter_rate
+    table: events_all
+
+ci:
+  job_timeout_minutes: 180
+  artifact_days: 180
+  fs_tools: true
