@@ -324,6 +324,7 @@ def init_userdb(cur):
     cols = ("user_id bigint NOT NULL, email citext NOT NULL, name text, "
             "created_at timestamptz NOT NULL DEFAULT now()")
     payload_col = ", payload jsonb" if mode != "none" else ""
+    payload_name = ", payload" if mode != "none" else ""
 
     payload_sel = ""
     if mode != "none":
@@ -424,7 +425,7 @@ def init_userdb(cur):
         else:
             cond = f" WHERE mod(i, {route_mod}) = {shard}"
         cur.execute(f"""
-            INSERT INTO {tname} (user_id, email, name, created_at{payload_col})
+            INSERT INTO {tname} (user_id, email, name, created_at{payload_name})
             SELECT i,
                    'user' || i || '@example.com',
                    'User ' || i,

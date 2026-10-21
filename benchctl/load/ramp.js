@@ -39,7 +39,6 @@ export const options = {
       ? {
           executor: 'constant-vus',
           vus: maxVUs,
-          preAllocatedVUs: maxVUs,
           duration: plan.load.duration || '90s',
         }
       : {
