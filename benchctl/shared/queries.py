@@ -183,6 +183,52 @@ QUERIES = [
 # range case rather than repeating q4.
 SHORT_RANGE_MS = 15 * 60 * 1000
 
+# User-management read shapes for the read-parallelism sweep (scenario
+# pg-readpool-*): the read side of the userdb schema, so k6 can drive a
+# pure read loop with no INSERT to hide behind. No `%s` placeholders —
+# these lookups are relative to the seeded 10M population, not to a
+# dataset window.
+QUERIES.extend([
+    {
+        "name": "user_login",
+        "intent": "A login: one point lookup on the unique e-mail index. The "
+                  "read shape every user-facing app runs most often.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            "users_all": """
+                SELECT user_id, name FROM users_all
+                WHERE email = 'user' || ((1 + (random() * 9999999)::int)::text)
+                      || '@example.com'
+                LIMIT 1""",
+        },
+    },
+    {
+        "name": "user_by_id",
+        "intent": "A profile fetch: primary-key point lookup.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            "users_all": """
+                SELECT user_id, email, created_at FROM users_all
+                WHERE user_id = 1 + (random() * 9999999)::int
+                LIMIT 1""",
+        },
+    },
+    {
+        "name": "user_recent",
+        "intent": "A dashboard count over the last day: range scan on "
+                  "created_at.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            "users_all": """
+                SELECT count(*) FROM users_all
+                WHERE created_at > now() - interval '1 day'""",
+        },
+    },
+])
+
 BACKENDS = ["prometheus", "metrics_jsonb", "metrics_norm_brin",
             "metrics_sharded"]
 

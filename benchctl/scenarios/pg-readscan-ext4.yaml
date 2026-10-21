@@ -1,0 +1,58 @@
+# Read scan + parallel workers: does a dashboard scan speed up with more
+# connections, or with more workers inside ONE query?
+#
+# Same 10M users, same closed loop — only the planner's parallel degree
+# changes. `benchctl_parallel_workers` reaches init.py, which does
+# ALTER SYSTEM + reload, so every connection of the leg sees the setting.
+#
+#   workers 0 — a single backend walks the created-at range
+#   workers 4 — Parallel Append over the range (4 vCPUs)
+#
+# If the scan gets faster in the second leg, the read-side answer to
+# "more parallelism" is worker width, not connection count.
+
+id: pg-readscan-ext4
+systems: [postgres/userdb]
+
+legs:
+  - {conns: 1, benchctl_parallel_workers: 0}
+  - {conns: 1, benchctl_parallel_workers: 4}
+  - {conns: 16, benchctl_parallel_workers: 4}
+
+queries:
+  postgres/userdb:
+    query: user_recent
+    table: users_all
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: constant_vus
+  duration: 60s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 100
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "10"
+
+size_gb: 40
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 120
+  artifact_days: 180

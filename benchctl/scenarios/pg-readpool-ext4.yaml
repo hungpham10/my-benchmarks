@@ -1,0 +1,65 @@
+# Read-parallelism sweep: how many connections does a READ take before
+# it stops paying?
+#
+# The write side has one hard ceiling — the WAL fsync lane (XLogFlush's
+# WALWriteLock) — so its curve turns over early (measured: 16 backends
+# 3-6ms p95, 500 backends 160-232ms, throughput falling). The read side
+# touches no such lane: each connection is an independent query. This
+# scenario measures where ITS knee is, with the same 10M users and the
+# same closed-loop executor, varying only the connection count.
+#
+# Query: user_login, a point lookup on the unique e-mail index — the
+# shape every user-facing app runs most.
+#
+# Expectation under test: throughput rises with connections until the
+# 4 vCPUs saturate, then p95 grows while throughput flattens — a
+# different knee, at a much larger connection count, than the write
+# side's.
+
+id: pg-readpool-ext4
+systems: [postgres/userdb]
+
+legs:
+  - {conns: 1}
+  - {conns: 4}
+  - {conns: 16}
+  - {conns: 64}
+  - {conns: 256}
+
+queries:
+  postgres/userdb:
+    query: user_login
+    table: users_all
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: constant_vus
+  duration: 60s
+
+thresholds:
+  p95_ms: 1000
+
+timeout_min: 120
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "10"
+
+size_gb: 40
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 150
+  artifact_days: 180
