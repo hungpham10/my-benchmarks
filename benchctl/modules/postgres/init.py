@@ -539,6 +539,9 @@ def init_idxlab(cur):
             "docs_bytes": doc_bytes,
             "index_bytes": idx_bytes,
             "requests": 1, "ix": ix}
+
+
+def init(ahead_minutes=8):
     """Load dataset into the SUT PostgreSQL.
 
     The driver has already:
