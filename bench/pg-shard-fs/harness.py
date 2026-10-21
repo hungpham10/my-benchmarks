@@ -264,7 +264,7 @@ def seed(dsn, layout, n, total, workers):
                        timestamp '2026-01-01' + (i %% ('30 days')::interval),
                        repeat(md5(i::text), (1800 / 32) + 1){payload_sel_sql}
                 FROM generate_series(1, %(e)s) g(i)
-                WHERE i %% {n} = %(sh)d
+                WHERE i %% {n} = %(sh)s
             """, {"e": total, "sh": shard})
             c.close()
 

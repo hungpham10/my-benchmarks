@@ -12,6 +12,7 @@ SOCKET_DIR="$(mktemp -d /tmp/pgsock.XXXXXX)"
 PG_BIN="$(ls -d /usr/lib/postgresql/18/bin 2>/dev/null || echo /usr/local/bin)"
 
 export PATH="$PG_BIN:$PATH"
+mkdir -p "$DATA_DIR" "$WAL_DIR"
 
 initdb -D "$DATA_DIR" --encoding=UTF8 --no-locale --no-instructions \
     --auth=trust --username=postgres

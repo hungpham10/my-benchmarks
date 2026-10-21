@@ -121,7 +121,7 @@ jobs:
           if [ "${{ matrix.fs }}" = xfs ] || [ "${{ matrix.fs }}" = ext4 ]; then
             IO=worker    # PG18 async IO via workers (io_uring needs kernel 6.x check)
           fi
-          OUT=$(bash bench/pg-shard-fs/setup-pg.sh /mnt/pgdata /mnt/pgwal 5433 $IO)
+          OUT=$(bash bench/pg-shard-fs/setup-pg.sh /mnt/pgdata/data /mnt/pgwal/wal 5433 $IO)
           echo "$OUT"
           DSN=$(echo "$OUT" | grep '^DSN=' | cut -d= -f2-)
           echo "DSN=$DSN" >> "$GITHUB_ENV"
@@ -142,7 +142,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          /usr/lib/postgresql/18/bin/pg_ctl -D /mnt/pgdata stop || true
+          /usr/lib/postgresql/18/bin/pg_ctl -D /mnt/pgdata/data stop || true
           sudo zpool destroy pgdata 2>/dev/null || true
           sudo zpool destroy pgwal  2>/dev/null || true
           sudo umount /mnt/pgdata /mnt/pgwal 2>/dev/null || true
