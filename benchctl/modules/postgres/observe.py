@@ -344,16 +344,20 @@ READ_SHAPES = {
         # app-side read-path cost being measured.
         "login": """
             SELECT user_id, name FROM users_all
-            WHERE email = 'user' || ((1 + (random() * 9999999)::int)::text)
-                  || '@example.com'
+            WHERE email = ('user' || ((1 + (random() * 9999999)::int)::text)
+                  || '@example.com')::citext
             LIMIT 1""",
         "by_id": """
             SELECT user_id, email, created_at FROM users_all
             WHERE user_id = 1 + (random() * 9999999)::int
             LIMIT 1""",
+        # Half the table (seed spans 730 days): big enough that the plan
+        # is a real scan, not a 13k-row index lookup. `recent` is the
+        # shape pg-readscan-* uses to compare connection count against
+        # parallel_workers_per_gather.
         "recent": """
             SELECT count(*) FROM users_all
-            WHERE created_at > now() - interval '1 day'""",
+            WHERE created_at > now() - interval '365 days'""",
     },
     "modshard": {
         # Same shapes as norm, but over the events_all view: the UNION ALL

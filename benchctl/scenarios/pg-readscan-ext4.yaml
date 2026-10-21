@@ -6,7 +6,11 @@
 # ALTER SYSTEM + reload, so every connection of the leg sees the setting.
 #
 #   workers 0 — a single backend walks the created-at range
-#   workers 4 — Parallel Append over the range (4 vCPUs)
+#   workers 4 — parallel plan over the range (4 vCPUs)
+#
+# The range is 365 of the 730 seeded days (~5M rows), wide enough that
+# the plan is a real scan. The first run used `now() - 1 day` and every
+# leg finished in ~1ms: it measured an index lookup, not a scan.
 #
 # If the scan gets faster in the second leg, the read-side answer to
 # "more parallelism" is worker width, not connection count.

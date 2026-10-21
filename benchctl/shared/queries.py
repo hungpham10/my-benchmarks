@@ -196,10 +196,15 @@ QUERIES.extend([
         "winner": "postgres",
         "promql": "",
         "sql": {
+            # The ::citext cast is load-bearing. citext -> text is an
+            # IMPLICIT cast (contrib/citext/citext--1.4.sql:83) while
+            # text -> citext is only ASSIGNMENT, so `email = <text expr>`
+            # resolves to text = text and cannot use the citext index.
+            # Without the cast every login is a seq scan.
             "users_all": """
                 SELECT user_id, name FROM users_all
-                WHERE email = 'user' || ((1 + (random() * 9999999)::int)::text)
-                      || '@example.com'
+                WHERE email = ('user' || ((1 + (random() * 9999999)::int)::text)
+                      || '@example.com')::citext
                 LIMIT 1""",
         },
     },
@@ -224,7 +229,7 @@ QUERIES.extend([
         "sql": {
             "users_all": """
                 SELECT count(*) FROM users_all
-                WHERE created_at > now() - interval '1 day'""",
+                WHERE created_at > now() - interval '365 days'""",
         },
     },
 ])

@@ -435,8 +435,21 @@ def init_userdb(cur):
     cur.execute("SET synchronous_commit = on")
     seconds = time.monotonic() - t0
 
+    # ANALYZE before anything reads. The bulk seed leaves pg_class without
+    # column statistics, so a read-only leg (pg-readpool-*) never gets the
+    # autoanalyze that a write leg triggers after ~50 inserts — the planner
+    # would keep believing the table is empty and pick a seq scan. That is
+    # measured, not theoretical: the first readpool run spent ~545ms per
+    # login because of exactly this. The ANALYZE is not part of the seed
+    # time; it gets its own number.
+    t0 = time.monotonic()
+    for tname, _shard in targets:
+        cur.execute(f"ANALYZE {tname}")
+    analyze_seconds = round(time.monotonic() - t0, 1)
+
     return {"samples": total, "seconds": round(seconds, 1),
             "samples_per_second": round(total / seconds, 1) if seconds > 0 else 0,
+            "analyze_seconds": analyze_seconds,
             "requests": 1, "layout": layout, "mode": mode, "shard_n": n}
 
 
