@@ -148,6 +148,12 @@ def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None, extra=None):
         load["max_vus"] = min(env_max_vus, mod_max_vus)
     else:
         load["max_vus"] = env_max_vus
+    # Pool-per-schema legs size the client to exactly P * conns VUs: one
+    # connection per VU, VU i talking to pool i % P. The cap IS the
+    # measurement (pool saturation is what an arrival rate collides with).
+    if extra and extra.get("pools"):
+        cap = int(extra["pools"]) * int(extra.get("conns", 16))
+        load["max_vus"] = min(load["max_vus"], cap)
 
     return {
         "scenario": scenario["id"],
@@ -163,7 +169,7 @@ def gen_plan(system, scenario, cfg, mod_cfg, fs_type=None, extra=None):
     }
 
 
-def gen_compose(module, cfg, mod_cfg, system, scenario, fs_state=None):
+def gen_compose(module, cfg, mod_cfg, system, scenario, fs_state=None, extra=None):
     env = cfg["envelope"]
     dep = mod_cfg["deploy"]
     volumes = []
@@ -225,6 +231,11 @@ def gen_compose(module, cfg, mod_cfg, system, scenario, fs_state=None):
         k6env["K6_QUERY_TIME"] = _K6_QUERY_TIME
     for k, v in k6cfg.get("env", {}).items():
         k6env[k] = expand(v)
+    # Leg dimensions flow to the k6 side too: the userdb insert step routes
+    # every transaction by LAYOUT/MODE/SHARDS, which are leg keys, not
+    # module constants.
+    for k, v in (extra or {}).items():
+        k6env[str(k).upper()] = str(v)
     k6svc = {
         "profiles": ["k6"],
         "image": "benchctl-k6",
@@ -553,7 +564,8 @@ def main():
         if os.path.islink(active) or os.path.exists(active):
             os.remove(active)
         os.symlink(module, active)
-        compose = gen_compose(module, cfg, mod_cfg, system, scenario, fs_state)
+        compose = gen_compose(module, cfg, mod_cfg, system, scenario, fs_state,
+                              extra)
         json.dump(compose, open(os.path.join(ROOT, "compose.gen.json"), "w"))
         buf = io.StringIO()
         yaml.safe_dump(compose, buf, default_flow_style=False)

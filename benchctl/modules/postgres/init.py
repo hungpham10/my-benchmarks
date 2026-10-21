@@ -279,6 +279,158 @@ def init_modshard(cur, total, t_start_ms, t_end_ms, interval_s, window_min):
             "shard_n": n}
 
 
+def init_userdb(cur):
+    """Variant 'userdb': the plain user-management schema.
+
+    The metrics datasets hide the filesystem behind bulk COPY and the
+    write size of a scrape. This variant is the opposite: a users table
+    with a couple of small rows and three equally small indexes. What the
+    FS comparison actually measures here are per-statement index
+    maintenance and the WAL fsync rate the layout's write path asks for.
+
+    The register leg varies:
+      LAYOUT  A single table (baseline)
+              B N tables users_00.., routed by user_id % N
+              C The same as B but spread over 8 schemas (namespace control)
+              E declarative PARTITION BY HASH (user_id)
+      MODE    none   no payload column at all (bare layout costs)
+              jsonb  payload jsonb, not indexed (TOAST cost only)
+              gin    payload jsonb + GIN jsonb_path_ops index
+
+    10M rows are seeded server-side (generate_series), so the measured
+    init_seconds is the bulk cost of the layout. The insert phase itself
+    is driven by k6 (one small transaction per arrival) — that is the
+    number the report is built on.
+    """
+    layout = (os.environ.get("LAYOUT")
+              or os.environ.get("SHARD_LAYOUT") or "A")
+    mode = os.environ.get("MODE", "none")
+    n = int(os.environ.get("SHARDS")
+            or os.environ.get("SHARD_N") or 32)
+    # POOLS is the pool dimension: user_id % P picks the pool, pool == 1
+    # schema, 1 table per schema. LAYOUT C is exactly this; the table
+    # count inside a pool stays at 1 (pool routing is the sharding key).
+    pools = int(os.environ.get("POOLS") or n)
+    total = int(os.environ.get("N_USERS") or "10000000")
+
+    cur.execute("DROP TABLE IF EXISTS users CASCADE")
+    cur.execute("DROP VIEW IF EXISTS users_all CASCADE")
+    cur.execute("DROP SCHEMA IF EXISTS s00, s01, s02, s03, s04, s05, s06, s07 CASCADE")
+
+    # Column set per mode. payload grows by a deterministic blob profile;
+    # 30% of the rows carry a >2KB blob so TOAST engages on the seeded set
+    # too, not just on the k6 phase.
+    cols = ("user_id bigint NOT NULL, email citext NOT NULL, name text, "
+            "created_at timestamptz NOT NULL DEFAULT now()")
+    payload_col = ", payload jsonb" if mode != "none" else ""
+
+    payload_sel = ""
+    if mode != "none":
+        # tier: five values; attrs.blob: md5 hex repeated — 30% long
+        payload_sel = (", jsonb_build_object("
+                       "'tier', 'tier_' || mod(i, 5), "
+                       "'tags', to_jsonb(array['alpha','beta','gamma']), "
+                       "'attrs', jsonb_build_object("
+                       "'blob', repeat(md5(i::text), "
+                       "CASE WHEN mod(i, 10) < 3 THEN 40 ELSE 16 END)))")
+
+    targets = []
+    def create_rw(name):
+        cur.execute(f"""
+            CREATE TABLE {name} (
+                user_id bigint NOT NULL,
+                email citext NOT NULL,
+                name text,
+                created_at timestamptz NOT NULL DEFAULT now(){payload_col},
+                PRIMARY KEY (user_id)
+            )""")
+        cur.execute(f"CREATE UNIQUE INDEX uq_email_{name.replace('.', '_')} "
+                    f"ON {name} (email)")
+        cur.execute(f"CREATE INDEX ix_created_{name.replace('.', '_')} "
+                    f"ON {name} (created_at)")
+        if mode == "gin":
+            cur.execute(f"CREATE INDEX gin_prof_{name.replace('.', '_')} "
+                        f"ON {name} USING gin (payload jsonb_path_ops)")
+
+    if layout == "A":
+        create_rw("users")
+        targets = [("users", None)]
+        cur.execute("CREATE VIEW users_all AS SELECT * FROM users")
+    elif layout == "E":
+        # DB-side routing: declarative hash partitioning. Not as a
+        # partitioned table it needs its own GIN/unique inside the
+        # parent — indexes on the parent cascade to partitions.
+        cur.execute(f"""
+            CREATE TABLE users (
+                user_id bigint NOT NULL,
+                email citext NOT NULL,
+                name text,
+                created_at timestamptz NOT NULL DEFAULT now(){payload_col},
+                PRIMARY KEY (user_id)
+            ) PARTITION BY HASH (user_id)""")
+        cur.execute("CREATE UNIQUE INDEX uq_email_users ON users (email)")
+        cur.execute("CREATE INDEX ix_created_users ON users (created_at)")
+        if mode == "gin":
+            cur.execute("CREATE INDEX gin_prof_users ON users "
+                        "USING gin (payload jsonb_path_ops)")
+        for i in range(n):
+            cur.execute(f"""
+                CREATE TABLE users_p{i} PARTITION OF users
+                FOR VALUES WITH (MODULUS {n}, REMAINDER {i})""")
+        targets = [("users", None)]
+        cur.execute("CREATE VIEW users_all AS SELECT * FROM users")
+    elif layout == "C":
+        # Pool-per-schema: P schemas s00.., each holding exactly ONE
+        # users table. user_id % P picks the pool; a connection that
+        # belongs to pool p never touches another schema. The seed routes
+        # the same way, so every schema holds the users of its pool.
+        for i in range(pools):
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS s{i:02d}")
+            qual = f"s{i:02d}.users"
+            create_rw(qual)
+            targets.append((qual, i))
+        cur.execute("CREATE VIEW users_all AS " + " UNION ALL ".join(
+            f"SELECT * FROM s{i:02d}.users" for i in range(pools)))
+    else:  # layout B
+        for i in range(n):
+            qual = f"users_{i:02d}"
+            create_rw(qual)
+            targets.append((qual, i))
+        cur.execute("CREATE VIEW users_all AS " + " UNION ALL ".join(
+            f"SELECT * FROM users_{i:02d}" for i in range(n)))
+
+    print(f"[init] userdb: layout={layout} mode={mode} n={n} "
+          f"pools={pools} users={total}", flush=True)
+
+    # ---- bulk seed: server-side generate_series ------------------------
+    # Straight INSERT per shard, single backend at a time (comparable to
+    # the other modules' bulk COPY). synchronous_commit is off here: the
+    # fsync-per-commit question is EXACTLY the k6 leg's question, and the
+    # seed must not pay it a million times.
+    cur.execute("SET synchronous_commit = off")
+    t0 = time.monotonic()
+    route_mod = pools if layout == "C" else n
+    for tname, shard in targets:
+        if shard is None:
+            cond = ""
+        else:
+            cond = f" WHERE mod(i, {route_mod}) = {shard}"
+        cur.execute(f"""
+            INSERT INTO {tname} (user_id, email, name, created_at{payload_col})
+            SELECT i,
+                   'user' || i || '@example.com',
+                   'User ' || i,
+                   now() - (mod(i, 730) * interval '1 day'){payload_sel}
+            FROM generate_series(1, {total}) g(i){cond}
+        """)
+    cur.execute("SET synchronous_commit = on")
+    seconds = time.monotonic() - t0
+
+    return {"samples": total, "seconds": round(seconds, 1),
+            "samples_per_second": round(total / seconds, 1) if seconds > 0 else 0,
+            "requests": 1, "layout": layout, "mode": mode, "shard_n": n}
+
+
 def init(ahead_minutes=8):
     """Load dataset into the SUT PostgreSQL.
 
@@ -395,6 +547,14 @@ def init(ahead_minutes=8):
         # series_dim must exist for the metric filters; load it after the
         # measurement COPY so its own COPY time is not measured (it is
         # constant across layout legs anyway).
+        return res
+
+    # ---- user-management variant: tiny rows, many small transactions --
+    if variant == "userdb":
+        res = init_userdb(cur)
+        conn.commit()
+        cur.close()
+        conn.close()
         return res
 
     # ---- generate rows using timestamps from dataset.json

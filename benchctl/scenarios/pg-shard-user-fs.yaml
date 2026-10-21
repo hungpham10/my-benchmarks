@@ -1,0 +1,66 @@
+# Where should the user table's data directory live, when the workload is
+# registrations — small transactions, WAL fsync per INSERT?
+#
+# Companion to pg-shard-user.yaml (same legs, there: layout on one
+# filesystem). Here the layout is fixed at B — 32 physical tables routed
+# by user_id % N — and the dimension is the filesystem under PGDATA:
+# ext4 / xfs / btrfs / zfs, provisioned by shared/fssetup on loop devices
+# with --direct-io=on.
+#
+# The mode pair keeps the GIN question riding along:
+#   B-none  — bare write path. The clearest fsync signal this framework
+#             can produce, because one arrival == one commit.
+#   B-gin   — registration with a jsonb profile + GIN path_ops index,
+#             where small writes multiply (heap + 3 btrees + GIN insert).
+#
+# If the none/gin ranking differs across filesystems, then "which FS"
+# is a workload question, not a device question — that is the headline
+# this scenario exists to test.
+
+id: pg-shard-user-fs
+systems: [postgres/userdb]
+filesystems: [ext4, xfs, btrfs, zfs]
+shape: counter
+scale: large
+
+legs:
+  - {layout: B, mode: none}
+  - {layout: B, mode: gin}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 50
+  time_unit: 1s
+  stages:
+    - { target: 100, duration: 30s }
+    - { target: 300, duration: 1m }
+  graceful_ramp_down: 15s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 120
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "30"
+  SHARD_N: "32"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 200
+  artifact_days: 180
+  fs_tools: true

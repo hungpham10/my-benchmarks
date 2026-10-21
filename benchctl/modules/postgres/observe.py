@@ -95,6 +95,16 @@ def sample_stats(variant=None):
 
     # modshard: physical layout differs, but the read contract is the same
     # VIEW (time, series_id, value) over the UNION of all shards.
+    # userdb: the read contract is the users_all view (A/E: single table;
+    # B/C: UNION ALL of the physical shards). sample count == N_USERS.
+    if variant == "userdb":
+        # No series_dim in this schema; parity is the row count itself.
+        cur.execute("SELECT count(*) FROM users_all")
+        count = int(cur.fetchone()[0] or 0)
+        cur.close()
+        conn.close()
+        return {"samples": count, "sum": float(count)}
+
     if variant in ("norm", "sharded", "modshard"):
         table = ("metrics_norm_brin" if variant == "norm"
                  else "metrics_sharded" if variant == "sharded"
@@ -293,6 +303,24 @@ READ_SHAPES = {
             JOIN series_dim s ON s.id = m.series_id
             WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
               AND s.metric = 'queue_depth'""",
+    },
+    "userdb": {
+        # Same three read shapes, on the user schema: point logins (the
+        # unique-email index), point fetches (the PK), and a created-at
+        # range. B/C pay the UNION ALL of users_all here — that is the
+        # app-side read-path cost being measured.
+        "login": """
+            SELECT user_id, name FROM users_all
+            WHERE email = 'user' || ((1 + (random() * 9999999)::int)::text)
+                  || '@example.com'
+            LIMIT 1""",
+        "by_id": """
+            SELECT user_id, email, created_at FROM users_all
+            WHERE user_id = 1 + (random() * 9999999)::int
+            LIMIT 1""",
+        "recent": """
+            SELECT count(*) FROM users_all
+            WHERE created_at > now() - interval '1 day'""",
     },
     "modshard": {
         # Same shapes as norm, but over the events_all view: the UNION ALL
@@ -529,12 +557,40 @@ def qbench(variant=None):
 
     # variant is "jsonb" | "norm" | "sharded" from driver (split_system),
     # but run_all() looks up shared/queries.py by backend key.
+    if variant == "userdb":
+        # The user schema has no metrics catalog: run the bespoke read
+        # shapes instead (login / by_id / recent), timed the same way.
+        dsn = _rewrite_dsn(PG_DSN, PG_PORT)
+        conn = psycopg.connect(dsn, autocommit=True)
+        results = {}
+        try:
+            cur = conn.cursor()
+            for name, sql in READ_SHAPES["userdb"].items():
+                samples = []
+                for _ in range(int(os.environ.get("QBENCH_MEASURE", "30"))):
+                    t0 = time.perf_counter()
+                    cur.execute(sql)
+                    cur.fetchall()
+                    samples.append((time.perf_counter() - t0) * 1000.0)
+                samples.sort()
+                p = lambda q: round(samples[min(len(samples) - 1,
+                                                int(len(samples) * q))], 2)
+                results[name] = {"p50_ms": p(0.5), "p95_ms": p(0.95),
+                                 "max_ms": round(samples[-1], 2),
+                                 "intent": f"userdb {name} read",
+                                 "winner_expected": "postgres"}
+            cur.close()
+        finally:
+            conn.close()
+        print(json.dumps(results))
+        return
+
     VARIANT_TO_BACKEND = {"jsonb": "metrics_jsonb",
                            "norm": "metrics_norm_brin",
                            "sharded": "metrics_sharded",
                            "modshard": "events_all"}
     if variant not in VARIANT_TO_BACKEND:
-        raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb, norm, sharded or modshard)")
+        raise RuntimeError(f"unknown postgres variant: {variant!r} (expected jsonb, norm, sharded, modshard or userdb)")
     backend = VARIANT_TO_BACKEND[variant]
 
     dsn = _rewrite_dsn(PG_DSN, PG_PORT)
