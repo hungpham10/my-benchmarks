@@ -32,17 +32,18 @@ envelope:
   k6_cpus: "1"
   k6_memory: 1G
 
+# Closed loop (constant-vus): each leg's VU budget is its pool sizing
+# (P x conns, capped by benchctl in gen_plan); the VUs push registrations
+# back to back, so the reported throughput is exactly what the pool
+# model sustains at saturation — the number the app cares about.
 load:
-  executor: ramping-arrival-rate
-  start_rate: 50
-  time_unit: 1s
-  stages:
-    - { target: 100, duration: 30s }
-    - { target: 300, duration: 1m }
-  graceful_ramp_down: 15s
+  executor: constant_vus
+  duration: 90s
 
 thresholds:
-  p95_ms: 500
+  # Saturation is the point: latency is allowed to climb while the pool
+  # drains; the throughput at 90s is the headline.
+  p95_ms: 2000
 
 timeout_min: 100
 
