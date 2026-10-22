@@ -4,6 +4,14 @@
 39543901032 (xfs) · 39543908599 (btrfs) · 39543916702 (zfs) ·
 branch `feat/fs-matrix`, driver code `f1cc829`.
 
+> **Revised 2026-10-22.** Two things in the first version did not
+> survive re-measurement: (a) the read columns were taken with a
+> non-indexable query shape and no `ANALYZE`, so they measured
+> sequential scans; (b) the filesystem ranking is not identifiable
+> from one run per cell, because the same FS moves by up to 1.95×
+> between batches. Both are corrected in place below; the write and
+> footprint numbers stand.
+
 ## The setup (per leg)
 
 Plain user-management schema: `users(user_id bigint PK, email citext
@@ -47,26 +55,34 @@ throughput (its/s) — latency med/p95 ms in parentheses.
 
 ## Index modes (ext4, 10M-row seed) — the real GIN picture
 
-| Mode        | seed rows/s | bytes/row | read: by_id p50/p95 | login p50/p95 |
-|-------------|-------------|-----------|---------------------|---------------|
-| none        | 56–63k      | 403–405   | 0.5–0.6s / 0.66s    | 1.05–1.2s / 1.5s |
-| jsonb       | 36.5k (−38%)| 1292 (+3.2×) | 10.4s / 15s      | 6.8s / 15s    |
-| gin(path_ops)| 34.9k (−44%)| **1348** (+3.3×) | 1.4s / 7.4s  | 3.1s / 12s    |
+| Mode        | seed rows/s | bytes/row |
+|-------------|-------------|-----------|
+| none        | 56–63k      | 403–405   |
+| jsonb       | 36.5k (−38%)| 1292 (+3.2×) |
+| gin(path_ops)| 34.9k (−44%)| **1348** (+3.3×) |
 
 - Layout costs are tiny (E ≈ +3% rows, M1/M2 ≈ ±0–7% vs single table)
   for the seed — the layout question is a WRITE-path question, only
   the k6 phase distinguishes them.
 - jsonb index (GIN) costs −44% write throughput AND +3.3× footprint.
-  Its containment read still costs seconds (view-wide scan).
+- **The read columns that used to be in this table are removed.** They
+  were measured before the read-shape fixes (`random()` in `WHERE`,
+  no `ANALYZE`; see `2026-10-21-pg-index-shard-read.md` §7), so the
+  "seconds per point lookup" was a sequential scan, not a property of
+  jsonb/GIN. Corrected reads are in that report; they have not been
+  re-measured per index mode.
 
 ## Findings (answerable, not speculative)
 
-1. **zfs fastest everywhere** — against the raw fsync expectation.
-   The measured ZFS properties are the stock ones: **recordsize 128K,
-   compression off** (`fs-zfs.json`; the harness sets no recordsize).
-   An earlier draft of this report claimed recordsize=8k — that was
-   wrong. Whatever the cause (ARC absorbing metadata, copy-on-write
-   batching), the ranking holds for the seed AND every model at 10M.
+1. **zfs led this matrix — but that is one run per cell on four
+   separate runners, not a ranking.** It led the seed and every model
+   at 10M; a later re-run of the same scale scenario on the same FS
+   moved by up to 1.95× (btrfs 4 448 → 8 656 it/s), which is wider than
+   the gap between filesystems. Treat the *ordering* here as
+   descriptive of this batch only. The 10M matrix ran at the stock
+   **recordsize 128K, compression off** (`fs-zfs.json`); the harness
+   now sets `recordsize=8k` for zfs, which is what let the 50M run fit
+   on disk. See `2026-10-21-pg-index-shard-read.md` §1 and §3.5.
 2. **M2 (table-suffix) ≥ M0 (single table)** with the SAME 16-conn
    pool budget — 6 757 vs 6 157 on ext4 (+10%), 8 915 vs 8 862 on zfs.
    Page contention across 32 heaps beats one hot heap. Cheap win,
@@ -79,18 +95,22 @@ throughput (its/s) — latency med/p95 ms in parentheses.
    latency worse: p50 83ms): more pools spread contention, but 500
    conns overwhelm WAL commit rate; the pool benefit saturates far
    below the naive "more pools = more throughput" curve.
-5. **FS ranking is MODEL-INDEPENDENT** (so far, at mode=none): zfs >
-   ext4 > xfs ≈ btrfs across every leg — no leg flips the ordering,
-   the fsync-interaction hypothesis did NOT hold for the small-commit
-   workload; fsync overhead is averaged out by group commit.
+5. **No leg flips the ordering inside this batch**: zfs > ext4 > xfs ≈
+   btrfs, at every model and at mode=none. The fsync-interaction
+   hypothesis did not hold for the small-commit workload — fsync
+   overhead is averaged out by group commit. But the between-batch
+   swing (see finding 1) is larger than the between-FS spread, so this
+   is "all four are within ~2×", not a ranking you can act on.
 
 ## Harness caveats (recorded honestly)
 
 - Read shapes go through the `users_all` UNION view (framework's
-  parity mechanism) — point lookups cost a full scan per shard; a real
-  app would hit the routed table directly. The absolute read numbers
-  above OVERESTIMATE the app-side read cost; relative M0 vs M1/M2
-  ordering still meaningful via the UNION width.
+  parity mechanism). **Correction:** the view was *not* inherently a
+  full scan per shard — that was the volatile-`random()` shape bug.
+  With statistics and an indexable predicate, warm p50 through the
+  32-branch view is 0.04–0.08 ms from a routed read. See
+  `2026-10-21-pg-index-shard-read.md` §2. The read numbers originally
+  in this report were measured before that fix and are not usable.
 - Arrival-mode runs (pg-shard-user) all capped at ~158 it/s by the
   ramping-arrival-rate executor standing up VUs slowly; that scenario
   is retained for the SEED/index comparison, not the latency axis.
