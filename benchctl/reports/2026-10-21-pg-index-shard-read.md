@@ -25,26 +25,34 @@ they disagree.
 
 `layoutA` = 1 table, `layoutB` = 32 tables `users_XX`, both 16
 connections. Throughput in iters/s, p95 in ms. Each cell is one 90s
-leg.
+leg. The two batches are the same scenario on different runners.
 
-| FS | 50M A | 50M B (32 tables) | 100M A | 100M B | p95 |
+| FS | batch | 50M A | 50M B (32 tables) | 100M A | 100M B |
 |---|---|---|---|---|---|
-| ext4 | 7 168 | 6 659 | 6 854 | 6 612 | 3–4 |
-| xfs | 4 632 | 4 519 | 4 523 | 4 568 | 6 |
-| btrfs | 4 448 | 4 328 | 4 978 | 5 106 | 5–6 |
-| **zfs (tuned)** | **8 909** | **8 895** | not measured | not measured | 3 |
+| ext4 | 1 (gh-295) | 7 168 | 6 659 | 6 854 | 6 612 |
+| ext4 | 2 (gh-307) | 4 898 | 4 869 | 5 006 | 5 047 |
+| xfs | 1 (gh-296) | 4 632 | 4 519 | 4 523 | 4 568 |
+| xfs | 2 (gh-308) | 5 218 | 5 880 | 5 757 | 5 089 |
+| btrfs | 1 (gh-297) | 4 448 | 4 328 | 4 978 | 5 106 |
+| btrfs | 2 (gh-309) | 8 656 | 8 739 | 8 899 | 8 473 |
+| zfs | 2 (gh-306, 8k) | 8 909 | 8 895 | not measured | not measured |
 
 - **Sharding does not move the write needle.** 1 table vs 32 tables is
-  flat at every size and on every finished FS: the WAL fsync lane
-  (`XLogFlush`, one `WALWriteLock` per instance) is not partitioned by
-  table names.
-- **zfs is the fastest writer in this matrix.** +24% over ext4 at 50M,
-  +44% at 10M — but those are single runs on a runner with ±40%
-  between-run noise, so treat "zfs ≥ ext4 ≥ xfs ≈ btrfs" as the
-  ordering and the exact gap as provisional. The 50M leg needed
-  `recordsize=8k` to fit (§7.5); that change did not create the lead
-  (zfs was already fastest at 10M on 128K), it only stopped the disk
-  from filling.
+  flat in every row of the table above, including both batches, every
+  size and every FS: the WAL fsync lane (`XLogFlush`, one
+  `WALWriteLock` per instance) is not partitioned by table names.
+- **The filesystem ranking is NOT identifiable from these runs.** The
+  same scenario on the same FS moves by up to 1.95× between batches
+  (btrfs 4 448 → 8 656; ext4 7 168 → 4 898), which is larger than the
+  spread between filesystems in either batch. Runners are separate
+  VMs with different loop-device backing disks, and seed time moves
+  with them (ext4 950 s vs 1 137 s; btrfs 872 s vs 628 s). The honest
+  summary is "all four are within ~2× of each other, and a single run
+  cannot rank them". Ranking them needs an A/B on one machine, or
+  several repetitions per FS with the median reported.
+- zfs is the only FS whose scale legs are consistent with its 10M
+  matrix number (8 862 / 8 909 / 8 895 it/s), which is weak evidence
+  — three points, two sizes. It is not a controlled comparison.
 - Disk cost per row falls with size: 242 B/row at 50M, 221 B/row at
   100M (same 4 indexes), i.e. the fixed per-relation overhead amortises.
   With `recordsize=8k`, zfs lands on the same 241.5/242.3 B/row as the
@@ -58,29 +66,43 @@ leg.
 
 **The four-order-of-magnitude gap reported in the first version of this
 report was an artifact, not a sharding cost.** Those numbers were taken
-while the read shapes still put `random()` in the `WHERE` clause (§7.3):
+while the read shapes still put `random()` in the `WHERE` clause (§7.2):
 a volatile qual is not a pseudo-constant, so the planner cannot use an
 index and every "point lookup" through the view degenerated into 32
 sequential scans with `LIMIT 1`. `ANALYZE` was missing too (§7.1), but
-the volatile qual alone is enough to force the scan. The 50M zfs leg —
-the first scale leg to run with both fixes — tells a different story
-(p50 ms, same 16 connections):
+the volatile qual alone is enough to force the scan. All four legs were
+re-run with both fixes; this is the corrected picture, 50M rows,
+`layoutB` (32 tables), 16 connections, p50 / p95 in ms:
 
-| Read, 50M rows, zfs tuned | view (`users_all`) | routed to one shard |
+| FS | view `login` | routed `login` | view `by_id` | routed `by_id` |
+|---|---|---|---|---|
+| ext4 | 0.26 / 9.3 | 0.18 / 1.3 | 0.25 / 2.3 | 0.17 / 0.8 |
+| xfs | 0.17 / 7.2 | 0.15 / 1.1 | 0.17 / 1.6 | 0.13 / 0.9 |
+| btrfs | 0.11 / 6.2 | 0.07 / 1.2 | 0.11 / 1.3 | 0.06 / 0.7 |
+| zfs (8k) | 0.11 / 30.9 | 0.07 / 1.9 | 0.10 / 1.7 | 0.07 / 1.2 |
+
+Cold (container restarted, page cache dropped; ext4 has no loop device,
+so the cold phase does not run for it — §8):
+
+| FS | view `login` | routed `login` |
 |---|---|---|
-| login, warm | 0.09 (A) / 0.11 (B) | 0.07 |
-| by_id, warm | 0.12 (A) / 0.10 (B) | 0.07 |
-| login, cold | 26.1 (A) / 69.0 (B) | 1.77 |
-| by_id, cold | 3.3 (A) / 3.7 (B) | 1.21 |
+| xfs | 132.8 | 1.11 |
+| btrfs | 78.6 | 1.40 |
+| zfs (8k) | 69.0 | 1.77 |
 
-- **Warm, routing buys nothing at the median, and 12–16× at the
-  tail**: 0.07 ms routed vs 0.09–0.11 ms through the 32-branch view
-  (p50), but 1.9 ms routed vs 23–31 ms (p95). The Append stops at the
-  first branch that matches and each branch gets an index scan; the
-  tail is the branch that does not match, or a plan that flips.
-- **Cold, routing buys 15–40×** (1.2–1.8 ms vs 26–69 ms): the view
-  touches 32 index roots instead of one, and those misses hit the
-  device. Still two orders, not four.
+- **Warm, routing buys nothing at the median**: the gap is 0.04–0.08 ms
+  on every FS. The Append stops at the first branch that matches and
+  each branch gets an index scan. Cost is one extra plan node, not 32
+  scans.
+- **Warm, routing buys 5–16× at the tail**: p95 is 1.1–1.9 ms routed
+  against 6.2–30.9 ms through the view. The tail is the branch that does
+  not match, plus (on zfs) the ARC eviction between runs.
+- **Cold, routing buys 39–120×** (0.7–1.8 ms vs 69–133 ms), because the
+  view touches 32 index roots instead of one. Two orders, not four.
+- **The routed number does not grow from 50M to 100M** (ext4 0.18/0.18,
+  xfs 0.15/0.13, btrfs 0.07/0.08, `login`, 50M/100M), while the view's
+  warm p50 is also flat in this range — the earlier claim that the view
+  "degrades with shard count" was the seq-scan artifact.
 - The old seconds-scale numbers remain useful for one thing only: they
   are what a **non-indexable** read shape (volatile `random()`) does to
   a 32-branch view. That is a real failure mode — and it is what the
@@ -88,10 +110,6 @@ the first scale leg to run with both fixes — tells a different story
   literal client-side, not by sharding. The old `routed_*` shapes never
   had the problem: they used a literal id, so they compared an index
   lookup against 32 seq scans, not routed against view.
-- The earlier ext4/xfs/btrfs scale legs ran before both fixes, so their
-  view/routed read numbers are **not comparable** to the table above.
-  Their write numbers are unaffected. A rerun of those three legs with
-  the fixed init is required before quoting a cross-FS read comparison.
 
 ## 3. Index lab — footprint, build, read, write tax
 
@@ -180,7 +198,8 @@ gone; xfs/btrfs/zfs only):
 
 So the zfs read story is two-sided and does not match the write story:
 
-- **Warm, it is the fastest on every shape** (10–40% below xfs/ext4 p50),
+- **Warm, it was the fastest on every shape in that batch** (10–40%
+  below xfs/ext4 p50; the 8k re-run is equal or better still, §3.5),
   but its p95 is *worse* on three of four shapes: ARC gives a lower
   median and a fatter tail.
 - **Cold, it is on par with xfs for indexed reads** (71 ms vs 74 ms on
@@ -317,13 +336,14 @@ parallel setup cost is amortised.
    btree fan-out, not measured with `pageinspect`).
 2. **Sharding does not buy writes.** 1 table vs 32 tables is flat at
    50M and 100M. The commit path is per instance, not per relation.
-3. **zfs, configured for Postgres, is the fastest writer here.** 8 909
-   (A) / 8 895 (B) it/s at 50M against ext4 7 168/6 659, xfs
-   4 632/4 519 and btrfs 4 448/4 328 at the same 16 connections, with
-   the same 241.5 B/row. Those are single runs with ±40% between-run
-   noise, so the gap is provisional; but the earlier "zfs writes
-   slowly" reading came from a 128K recordsize (§7.5) and must not be
-   reused.
+3. **The filesystem write ranking is not identifiable from
+   one-run-per-cell.** The same scenario on the same FS moved 1.95×
+   between batches (btrfs 4 448 → 8 656 it/s), which swamps the
+   between-FS spread. What is solid: sharding is flat in every row, and
+   all four FS land within ~2× of each other. zfs is the only FS
+   consistent across its three runs (8 862 / 8 909 / 8 895), which is
+   weak evidence, not a verdict. Ranking them requires an A/B on one
+   machine or repeated runs with a median.
 4. **The per-index write bill is FS-dependent**: ≤4% on ext4/btrfs,
    11% on xfs, 20% on 128K zfs for the worst AM (SP-GiST point) —
    9.5% on zfs at `recordsize=8k` (§3.5). BRIN is free within noise and
@@ -390,7 +410,11 @@ number:
   before any cross-FS read claim at scale.
 - 4 vCPU, 8 GB, one container per leg, WAL on the FS under test.
   Absolute throughput moves ±40% between runs; ratios within a leg are
-  the evidence.
+  the evidence. The scale batches show it can be worse: the same FS
+  moved 1.95× (btrfs, §1), so the between-FS write ranking is not
+  resolved by these runs.
+- Cold reads need a loop device, so ext4 (native, no loop) has no cold
+  phase. The cold table is xfs/btrfs/zfs only.
 - `pg_test_fsync` refuses O_DIRECT on zfs, so the raw fsync column is
   missing there by design; fio + `pg_stat_io` cover the gap.
 - `prefix_name`/`trgm_like` carry a `LIMIT 100` and an id-ordered
@@ -411,6 +435,9 @@ number:
 | scale 50M/100M, btrfs | `pg-shard-scale-btrfs` | gh-297 |
 | scale 50M/100M, zfs | `pg-shard-scale-zfs` | gh-298 (failed: disk, see §7.5) |
 | scale 50M tuned (8k), zfs | `pg-shard-scale-zfs-50m` | gh-306 |
+| scale batch 2, ext4 | `pg-shard-scale-ext4` | gh-307 |
+| scale batch 2, xfs | `pg-shard-scale-xfs` | gh-308 |
+| scale batch 2, btrfs | `pg-shard-scale-btrfs` | gh-309 |
 | read sweep, ext4 | `pg-readpool-ext4` | gh-301/303 |
 | scan + workers, ext4 | `pg-readscan-ext4` | gh-302/304 |
 
