@@ -73,10 +73,11 @@ the first scale leg to run with both fixes — tells a different story
 | login, cold | 26.1 (A) / 69.0 (B) | 1.77 |
 | by_id, cold | 3.3 (A) / 3.7 (B) | 1.21 |
 
-- **Warm, routing buys nothing measurable**: 0.07 ms routed vs
-  0.09–0.11 ms through the 32-branch view. The Append stops at the
-  first branch that matches, and with statistics the planner gives each
-  branch an index scan. Cost is one extra plan node, not 32 scans.
+- **Warm, routing buys nothing at the median, and 12–16× at the
+  tail**: 0.07 ms routed vs 0.09–0.11 ms through the 32-branch view
+  (p50), but 1.9 ms routed vs 23–31 ms (p95). The Append stops at the
+  first branch that matches and each branch gets an index scan; the
+  tail is the branch that does not match, or a plan that flips.
 - **Cold, routing buys 15–40×** (1.2–1.8 ms vs 26–69 ms): the view
   touches 32 index roots instead of one, and those misses hit the
   device. Still two orders, not four.
@@ -263,9 +264,10 @@ parallel setup cost is amortised.
 
 ## 6. Findings
 
-1. **Routing a shard saves cold cache misses, not query plans.** Warm,
-   a routed point read is 0.07 ms against 0.09–0.11 ms through the
-   32-branch view — no measurable difference. Cold, routing is worth
+1. **Routing a shard saves cold cache misses and warm tail latency,
+   not warm median plan time.** Warm, a routed point read is 0.07 ms
+   against 0.09–0.11 ms through the 32-branch view at p50 — no
+   measurable difference — but 1.9 ms against 23–31 ms at p95. Cold, routing is worth
    15–40× (1.2–1.8 ms vs 26–69 ms) because the view touches 32 index
    roots. The four-order gap in the first version of this report was a
    read-shape bug (§7.2, §7.3), not a property of sharding. Index

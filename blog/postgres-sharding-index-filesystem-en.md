@@ -47,7 +47,7 @@ I had opinions again. So I ran a second benchmark: one user table, four filesyst
 
 ## The short version
 
-- **Warm, routing a point lookup to one shard table saves nothing measurable: 0.07 ms routed vs 0.09–0.11 ms through a 32-branch `UNION ALL` view.** Cold, it is worth 15–40× (1.2–1.8 ms vs 26–69 ms). The four-order gap I first reported was a measurement bug, not sharding.
+- **Warm, routing a point lookup to one shard table saves nothing at p50 (0.07 vs 0.09–0.11 ms through a 32-branch `UNION ALL` view) but 12–16× at p95.** Cold, it is worth 15–40× (1.2–1.8 ms vs 26–69 ms). The four-order gap I first reported was a measurement bug, not sharding.
 - **Sharding did nothing for writes.** One table vs 32 tables was flat at 10M, 50M and 100M rows: the WAL fsync lane is per instance, not per table.
 - **The filesystem did move writes — when configured for Postgres.** At 50M rows, zfs (`recordsize=8k`) inserted 8 909 rows/s against ext4's 7 168 at the same 16 connections.
 - **Adding connections hurts after ~16.** Writes: p95 3 ms at 16 connections → 82 ms at 128 → 232 ms at 500, with throughput *falling*. The cause is one `WALWriteLock` and one `ProcArrayLock`.
@@ -124,7 +124,7 @@ What sharding buys on the read path is smaller than I first reported, and it is 
 | login, cold | 26 ms (1 table) / 69 ms (32 tables) | **1.77 ms** |
 | by_id, cold | 3.3 ms / 3.7 ms | **1.21 ms** |
 
-Warm, the 32-branch view is within 0.04 ms of a direct shard read: the Append stops at the first branch that has the row, and with statistics each branch gets an index scan. Cold, the view is 15–40× slower because it touches 32 index roots instead of one.
+Warm, the 32-branch view is within 0.04 ms of a direct shard read at p50: the Append stops at the first branch that has the row, and with statistics each branch gets an index scan. At p95 it is 23–31 ms against 1.9 ms routed, and cold it is 15–40× slower, because the view touches 32 index roots instead of one.
 
 I originally published 4.9–19.9 s for the view against 0.11–0.20 ms routed. That was not a sharding cost: those reads used `random()` in the `WHERE` clause, a volatile expression the planner cannot treat as a pseudo-constant, so every branch did a sequential scan — and the routed shapes used a literal id, so the comparison was "index lookup vs 32 seq scans". Fixing the shape moved the view from seconds to 0.1 ms. **A `UNION ALL` view over shards is cheap when the planner has statistics and the predicate is indexable; it is catastrophic when it does not.** Test it with `EXPLAIN (ANALYZE, BUFFERS)` before you rewrite your application for routing.
 
