@@ -37,10 +37,12 @@ leg. The two batches are the same scenario on different runners.
 | btrfs | 2 (gh-309) | 8 656 | 8 739 | 8 899 | 8 473 |
 | zfs | 2 (gh-306, 8k) | 8 909 | 8 895 | not measured | not measured |
 
-- **Sharding does not move the write needle.** 1 table vs 32 tables is
-  flat in every row of the table above, including both batches, every
-  size and every FS: the WAL fsync lane (`XLogFlush`, one
-  `WALWriteLock` per instance) is not partitioned by table names.
+- **Sharding does not move the write needle.** 1 table vs 32 tables
+  differs by at most ~13% in any row of the table above, and the sign
+  flips between rows (XFS batch 2 at 50M: 5 218 vs 5 880); the gap is
+  smaller than the batch-to-batch noise. The WAL fsync lane
+  (`XLogFlush`, one `WALWriteLock` per instance) is not partitioned by
+  table names.
 - **The filesystem ranking is NOT identifiable from these runs.** The
   same scenario on the same FS moves by up to 1.95× between batches
   (btrfs 4 448 → 8 656; ext4 7 168 → 4 898), which is larger than the
@@ -135,9 +137,10 @@ build seconds differ per FS. **The zfs column is 128K recordsize
 | spgist_point | 429.3 MB | 43.7 s | 44.9 s | 45.6 s | 46.3 s |
 | gist_point | 510.8 MB | 10.2 s | 10.5 s | 12.1 s | 35.9 s |
 
-- BRIN is 5 400× smaller than a GiST index on the same column and
-  builds 8–9× faster. That is the whole BRIN trade: block-range
-  summaries instead of per-row entries.
+- BRIN on `created_at` is more than 9 000× smaller than the GiST
+  index on `point` (56 KB vs 510.8 MB, same table, different columns)
+  and builds about 3× faster than btree (5.6 s vs 24.6 s). That is the
+  whole BRIN trade: block-range summaries instead of per-row entries.
 - Build time is an FS question too: untuned zfs pays 1.3–3.4× the ext4
   build time for the same bytes (metadata-heavy index build plus the
   16× record amplification of §7.5), except for SP-GiST point, where
@@ -339,15 +342,16 @@ parallel setup cost is amortised.
 3. **The filesystem write ranking is not identifiable from
    one-run-per-cell.** The same scenario on the same FS moved 1.95×
    between batches (btrfs 4 448 → 8 656 it/s), which swamps the
-   between-FS spread. What is solid: sharding is flat in every row, and
-   all four FS land within ~2× of each other. zfs is the only FS
+   between-FS spread. What is solid: sharding stays within ~13% and the
+   sign flips between rows, and all four FS land within ~2× of each
+   other. zfs is the only FS
    consistent across its three runs (8 862 / 8 909 / 8 895), which is
    weak evidence, not a verdict. Ranking them requires an A/B on one
    machine or repeated runs with a median.
 4. **The per-index write bill is FS-dependent**: ≤4% on ext4/btrfs,
    11% on xfs, 20% on 128K zfs for the worst AM (SP-GiST point) —
    9.5% on zfs at `recordsize=8k` (§3.5). BRIN is free within noise and
-   5 400× smaller.
+   more than 9 000× smaller than the GiST index on the same table.
 5. **Each access method wins exactly its own shape** — BRIN range,
    hash equality, GiST kNN, SP-GiST prefix. Picking "an index" without
    the query shape is how a 1.7 ms range becomes a 3 s scan.
