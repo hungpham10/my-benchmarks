@@ -1,7 +1,7 @@
 ---
 title: "Your Postgres isn't slow because of Postgres: filesystem, sharding and index type, benchmarked"
 date: 2026-10-21
-lastmod: 2026-10-21
+lastmod: 2026-10-22
 tags: [postgresql, benchmark, sharding, index, filesystem]
 excerpt: "After the metrics post, the same Head of Platform asked a harder question: if Postgres is fine for app data, why does it crawl in production? I benchmarked the three suspects nobody measures: the filesystem, the sharding model, and the index type."
 ---
@@ -21,7 +21,7 @@ excerpt: "After the metrics post, the same Head of Platform asked a harder quest
     "name": "Platform Engineering Blog"
   },
   "datePublished": "2026-10-21",
-  "dateModified": "2026-10-21",
+  "dateModified": "2026-10-22",
   "mainEntityOfPage": {
     "@type": "WebPage",
     "@id": "https://example.com/blog/postgres-sharding-index-filesystem"
@@ -47,12 +47,13 @@ I had opinions again. So I ran a second benchmark: one user table, four filesyst
 
 ## The short version
 
-- **A point lookup is 0.11–0.20 ms when routed to one shard table, and 4.9–19.9 s through a 32-branch `UNION ALL` view.** That is four orders of magnitude, from routing alone.
+- **Warm, routing a point lookup to one shard table saves nothing measurable: 0.07 ms routed vs 0.09–0.11 ms through a 32-branch `UNION ALL` view.** Cold, it is worth 15–40× (1.2–1.8 ms vs 26–69 ms). The four-order gap I first reported was a measurement bug, not sharding.
 - **Sharding did nothing for writes.** One table vs 32 tables was flat at 10M, 50M and 100M rows: the WAL fsync lane is per instance, not per table.
+- **The filesystem did move writes — when configured for Postgres.** At 50M rows, zfs (`recordsize=8k`) inserted 8 909 rows/s against ext4's 7 168 at the same 16 connections.
 - **Adding connections hurts after ~16.** Writes: p95 3 ms at 16 connections → 82 ms at 128 → 232 ms at 500, with throughput *falling*. The cause is one `WALWriteLock` and one `ProcArrayLock`.
 - **Reads scale further, then hit the CPU.** 5.2k queries/s at 1 connection, 10.1k at 16, then 7.4k at 256 with p95 up 26×.
 - **Index choice is worth 1 800×** on the shape it matches: BRIN answers a 7-day range in 1.7 ms where a sequential scan takes 3.1 s. The same BRIN index is 56 KB; a GiST index on the same table is 511 MB.
-- **Filesystem changes the write bill 1.4–2× and index build time 1.3–3.4×**, but not the routing win.
+- **Filesystem changes the write bill up to ~1.9× and (as measured, untuned) index build time 1.3–3.4×**, but it does not change the routing decision.
 
 ## Setup
 
@@ -85,8 +86,9 @@ At 50M and 100M rows the spread stays:
 | ext4 | 7 168 | 6 659 | 6 854 | 6 612 |
 | xfs | 4 632 | 4 519 | 4 523 | 4 568 |
 | btrfs | 4 448 | 4 328 | 4 978 | 5 106 |
+| zfs (`recordsize=8k`) | **8 909** | **8 895** | not measured | not measured |
 
-Two honest notes. First, zfs led the 10M matrix and did not lead the 50M/100M sweep — those are different runs on a noisy runner, so I will not crown a winner from it; what repeats is the *size* of the gap, 1.4–2×, not its direction. Second, this is a small-commit workload: one insert per transaction, `synchronous_commit=on`. That is exactly where filesystem commit behaviour shows up, and it is also why the spread is smaller than folklore suggests — group commit amortises most of the fsync cost.
+Two honest notes. First, zfs led at 10M, disappeared from the 50M sweep for a while (it ran out of disk — see "What I got wrong"), and led again at 50M once configured properly. That is one run per cell on a runner with ±40% between-run noise, so take the ordering as provisional and the size of the gap (1.2–1.9×) as the repeatable part. Second, this is a small-commit workload: one insert per transaction, `synchronous_commit=on`. That is exactly where filesystem commit behaviour shows up, and it is also why the spread is smaller than folklore suggests — group commit amortises most of the fsync cost.
 
 Index build time shows the same filesystem effect more cleanly, because there is no concurrency to hide it:
 
@@ -96,7 +98,7 @@ Index build time shows the same filesystem effect more cleanly, because there is
 | GiST on `point` | 10.2 s | 35.9 s |
 | btree on `name` | 24.6 s | 42.2 s |
 
-Same bytes written, 1.3–3.4× the time on zfs. If your platform team argues about filesystems for a week, this table is the argument: it changes the constant, not the architecture.
+Same bytes written, 1.3–3.4× the time on zfs — but that zfs column is **untuned 128K recordsize**, the setting that also killed the scale run. With 8 KB records the build picture would improve; I have not re-measured it, so I am not putting a number on it. Even so: the filesystem changes the constant, not the architecture.
 
 Reads behave differently, and this is where the "zfs is fast" claim needs splitting:
 
@@ -107,22 +109,24 @@ Reads behave differently, and this is where the "zfs is fast" claim needs splitt
 | full seq scan, cold | — | **3 103 ms** | 3 164 ms | 4 062 ms |
 | hash equality, warm p50 | 0.25 ms | 0.23 ms | 0.24 ms | **0.16 ms** |
 
-Warm, zfs has the lowest median on every indexed shape — but a *worse* p95 on three of four (ARC keeps the median low and the tail fat). Cold, it is level with xfs on indexed reads and slower on a full heap scan, because the measured ZFS properties are stock: recordsize 128K, compression off. None of this matters next to the routing gap below (seconds), which is why I do not recommend choosing a filesystem for point reads.
+Warm, zfs has the lowest median on every indexed shape — but a *worse* p95 on three of four (ARC keeps the median low and the tail fat). Cold, it is level with xfs on indexed reads and slower on a full heap scan, because these were measured at the stock 128K recordsize (§ below), not the 8k used for the scale run. None of this matters next to the routing difference below — tenths of a millisecond warm, 15–40× cold — which is why I do not recommend choosing a filesystem for point reads.
 
 ## 2. Sharding: what it buys and what it doesn't
 
 I expected table sharding to help writes. It didn't. At every size, 1 table vs 32 tables is within noise, and the reason is in the source: every commit ends in `XLogFlush` (`xlog.c:2780`), which takes the single instance-wide `WALWriteLock`; `ProcArrayEndTransaction` (`procarray.c:667`) takes `ProcArrayLock` exclusively per commit. Neither lock knows which table you wrote to. Splitting a table into 32 tables gives you 32 heaps and 32 btree roots — and exactly one fsync lane.
 
-What sharding *does* buy is the read path, but only if the application routes:
+What sharding buys on the read path is smaller than I first reported, and it is about cache misses rather than query plans:
 
-| Read | Through `users_all` view | Routed to one shard |
+| Read, 50M rows, zfs | Through `users_all` view | Routed to one shard |
 |---|---|---|
-| login, ext4 100M | 8 436 ms | **0.14 ms** |
-| by_id, ext4 100M | 4 939 ms | **0.11 ms** |
-| login, xfs 100M | 15 747 ms | **0.20 ms** |
-| login, btrfs 100M | 14 657 ms | **0.13 ms** |
+| login, warm | 0.09 ms (1 table) / 0.11 ms (32 tables) | **0.07 ms** |
+| by_id, warm | 0.12 ms / 0.10 ms | **0.07 ms** |
+| login, cold | 26 ms (1 table) / 69 ms (32 tables) | **1.77 ms** |
+| by_id, cold | 3.3 ms / 3.7 ms | **1.21 ms** |
 
-The routed number is flat from 50M to 100M rows. The view number grows with shard count, because `UNION ALL` over 32 tables runs 32 index scans and `LIMIT 1` cannot stop an Append. This is the single most important result in the whole benchmark: **sharding is a routing decision, not a PostgreSQL feature.** If your query layer does not know the shard key, sharding makes reads worse, not better.
+Warm, the 32-branch view is within 0.04 ms of a direct shard read: the Append stops at the first branch that has the row, and with statistics each branch gets an index scan. Cold, the view is 15–40× slower because it touches 32 index roots instead of one.
+
+I originally published 4.9–19.9 s for the view against 0.11–0.20 ms routed. That was not a sharding cost: those reads used `random()` in the `WHERE` clause, a volatile expression the planner cannot treat as a pseudo-constant, so every branch did a sequential scan — and the routed shapes used a literal id, so the comparison was "index lookup vs 32 seq scans". Fixing the shape moved the view from seconds to 0.1 ms. **A `UNION ALL` view over shards is cheap when the planner has statistics and the predicate is indexable; it is catastrophic when it does not.** Test it with `EXPLAIN (ANALYZE, BUFFERS)` before you rewrite your application for routing.
 
 Model M1 is the cautionary tale. It has 8–31× more connections than M0 and still loses 13–26% throughput with 20–60× worse p95. Pool-per-schema partitions namespace and relcache; it does not partition the commit path. More pools on one instance means more backends queueing on the same two locks.
 
@@ -227,10 +231,11 @@ This post took four attempts because I kept measuring the wrong thing, and the w
 2. **`random()` in a `WHERE` clause.** `random()` is volatile; `is_pseudo_constant_clause` (`clauses.c:2113`) rejects volatile expressions, so no index can be used. Every "point lookup" was a sequential scan with `LIMIT 1`: 5.97 s per login, 12 queries in 60 s. Moving the randomisation into the client fixed it — 0.19 ms per login.
 3. **A `citext` cast that never matched the index.** `citext → text` is an IMPLICIT cast, `text → citext` is only ASSIGNMENT, so `email = <text expression>` compares as text and misses the citext index. One `::citext` changes a 4.6 s scan into 0.2 ms.
 4. **A scan benchmark that scanned nothing.** `now() - interval '1 day'` matched 13k of 10M rows; `count(*)` was answered by an index-only scan. Neither shape can show a parallel plan. The fix (365 days, `sum(user_id)`) produced a real scan — and an inconclusive worker result, which I am reporting as inconclusive.
+5. **A zfs dataset at the stock 128K recordsize.** Postgres writes 8 KB pages; a 128K record means each dirty page rewrites the whole record — up to 16× amplification. The 50M/100M zfs run died after four hours with the runner unable to write its own log: "No space left on device". `recordsize=8k` fixed the disk blow-up. It did not create zfs's write lead — zfs was already fastest at 10M on the 128K setting (8 862 rows/s); the 8k change is what lets the same data fit on the runner at 50M. Every zfs number measured before that fix is untuned, including the build times above and the warm/cold read table.
 
 ## What I'd say now
 
-> PostgreSQL is rarely the slow part. The filesystem changes write cost by 1.4–2×, sharding changes read cost by four orders of magnitude *if you route*, and the index type changes a query by up to 1 800×. Connection count is a knee, not a dial: past ~4× your cores, more connections buy queueing, and the WAL fsync lane makes the write knee arrive earlier and hurt more.
+> PostgreSQL is rarely the slow part. The filesystem changes write cost by 1.4–2×, routing a shard changes *cold* read cost by 15–40× (and warm read cost by nothing measurable), and the index type changes a query by up to 1 800×. Connection count is a knee, not a dial: past ~4× your cores, more connections buy queueing, and the WAL fsync lane makes the write knee arrive earlier and hurt more.
 >
 > If a Postgres is crawling, measure in this order: the query plan and its index, then the routing (is it scanning every shard?), then the connection count against the knee, and only then the filesystem. Most teams start at the last one.
 
@@ -246,11 +251,12 @@ This post took four attempts because I kept measuring the wrong thing, and the w
 
 - 10M rows for the index lab, 50M/100M for the sharding sweep. The 200M point was dropped because ~80 GB exceeds the runner disk.
 - 4 vCPU, 8 GB, one container per leg. Absolute throughput moves ±40% between runs; only within-leg ratios are evidence.
-- The zfs 50M/100M leg was still running when this was written; the zfs numbers above are from the 10M matrix and the index lab.
+- zfs is measured at 50M only, with the tuned `recordsize=8k`. Its 100M leg is unmeasured: the first attempt died on the disk ceiling.
+- The 50M zfs leg is the only scale leg whose reads used the fixed query shapes. ext4/xfs/btrfs 50M reads predate the `random()`/`ANALYZE` fixes and need a rerun before any cross-filesystem read claim at scale.
 - Btree height (3 levels at 10M, 4 at 100M) is computed from page fan-out, not measured with `pageinspect`.
 - The prefix and substring shapes carry `LIMIT 100` on an id-ordered table, which lets a sequential scan exit early; see the caveats in section 3.
 - The parallel-worker experiment is inconclusive at this size and CPU count. I am not claiming a win in either direction.
-- The read sweep was run on ext4 only; filesystem effects on the read path are second-order here (routed reads were 0.11–0.20 ms on every FS).
+- The read sweep was run on ext4 only; filesystem effects on the read path are second-order here.
 
 The harness, scenarios and raw artifacts are in `benchctl/` at
 [github.com/hungpham10/my-benchmarks](https://github.com/hungpham10/my-benchmarks);
