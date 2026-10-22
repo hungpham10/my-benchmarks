@@ -9,6 +9,7 @@ Four checks, each a test (fail = no report), not a comment:
 """
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.parse
@@ -18,7 +19,8 @@ RESULTS = os.path.join(os.path.dirname(os.path.dirname(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARED = os.path.join(ROOT, "shared")
 sys.path.insert(0, SHARED)
-import queries as Q
+import queries as Q  # noqa: E402
+from leg import leg_slug  # noqa: E402 — same slug rule as the driver and k6
 
 
 def load_all_summaries():
@@ -53,25 +55,45 @@ def check_parity():
     for f in stats_files:
         stats = json.load(open(os.path.join(RESULTS, f)))
         module = stats["module"]
+        # A leg is a (system, filesystem) pair. Keying by the system alone
+        # would let the four filesystem legs overwrite each other, and the
+        # parity check would compare a filesystem with itself.
+        fs = stats.get("fs") or ""
+        # A leg is a (system, filesystem, extra) tuple. Keying by the system
+        # alone would let the legs overwrite each other, and the parity check
+        # would compare a leg with itself.
+        extra = stats.get("extra") or ""
+        key = f"{module}@{fs}" if fs else module
+        if extra:
+            key = f"{key}#{extra}"
         count = stats["samples"]
         sum_val = stats["sum"]
 
-        module_stats[module] = {"count": count, "sum": sum_val}
-        print(f"[parity] {module}: count={count}, sum={sum_val}")
+        module_stats[key] = {"count": count, "sum": sum_val}
+        print(f"[parity] {key}: count={count}, sum={sum_val}")
 
     # Compare counts with small tolerance (Prometheus ingestion may drop a
     # handful of samples under WAL backpressure). Sums are logged for
     # diagnostics but not compared exactly: PromQL instant-query evaluation
     # at a future `time=` can differ from Postgres's DISTINCT ON last-value
     # even when the underlying samples are identical.
-    counts = [v["count"] for v in module_stats.values()]
-    sums = [v["sum"] for v in module_stats.values()]
-    n_sys = len(counts)
-
-    # All counts must be within 2% of each other
-    count_min, count_max = min(counts), max(counts)
-    if count_min == 0 or count_max / count_min > 1.02:
-        return False, f"counts differ: {module_stats}"
+    #
+    # Legs that declare their own population (extra label carries
+    # n_users<digits>, e.g. the scale sweep's 50M/100M legs) are grouped by
+    # that population first: 50M and 100M legs differ BY DESIGN, and a
+    # cross-group comparison would fail on a valid run.
+    groups = {}
+    for key, v in module_stats.items():
+        m = re.search(r"n_users(\d+)", key)
+        groups[m.group(1) if m else ""] = groups.get(m.group(1) if m else "", [])
+        groups[m.group(1) if m else ""].append(v["count"])
+    for tag, counts in groups.items():
+        if not counts:
+            continue
+        count_min, count_max = min(counts), max(counts)
+        if count_min == 0 or count_max / count_min > 1.02:
+            return False, (f"counts differ (group {tag or 'default'}): "
+                           f"{module_stats}")
 
     # Sums are diagnostic only, never a pass/fail gate. The two engines do not
     # define "last value" the same way: Prometheus evaluates the instant query
@@ -79,13 +101,43 @@ def check_parity():
     # dropped samples), while Postgres takes DISTINCT ON the true last row.
     # Even on identical samples the totals legitimately diverge. Failing on
     # this would fail the suite on engine semantics, not on data integrity.
+    sums = [v["sum"] for v in module_stats.values()]
     sum_min = min(s for s in sums if s > 0)
     sum_max = max(sums)
     ratio = sum_max / sum_min if sum_min else float("inf")
     print(f"[parity] sum ratio (diagnostic only, not a gate): {ratio:.2f}x")
 
-    return True, (f"parity ok: count={count_max} (within 2%); "
+    return True, (f"parity ok: counts within 2% per n_users group; "
                   f"sum ratio {ratio:.2f}x recorded as diagnostic only")
+
+
+def metric_count(metric):
+    """The count of a k6 counter metric, wherever it happens to hide.
+
+    k6's summary JSON puts the value under "values" in some versions
+    and flat in others, a counter that never fired is missing
+    entirely, and an old-style summary stores a list of value objects.
+    All of those have to read as a number, because "zero dropped" and
+    "no drop counter at all" are the same thing to the checks below —
+    and reading the wrong nesting level turns 54,867 dropped requests
+    into zero, which is exactly the mistake that made a saturated leg
+    look like a broken curve.
+    """
+    if not metric:
+        return 0
+    if isinstance(metric, list):
+        metric = metric[0] if metric else {}
+    if not isinstance(metric, dict):
+        return 0
+    values = metric.get("values")
+    if isinstance(values, dict):
+        return int(values.get("count", 0) or 0)
+    if isinstance(values, list) and values:
+        first = values[0]
+        if isinstance(first, dict):
+            return int(first.get("count", 0) or 0)
+        return 0
+    return int(metric.get("count", 0) or 0)
 
 
 def check_continuity(min_points=10):
@@ -98,9 +150,22 @@ def check_continuity(min_points=10):
         trend = m.get("step_latency_ms")
         if not trend:
             return False, f"{slug}: step_latency_ms missing (module step never reported)"
-        n = m.get("iterations", {}).get("values", {}).get("count", 0)
+        n = metric_count(m.get("iterations"))
         if n < min_points:
-            return False, f"{slug}: only {n} latency samples (< {min_points}): curve is fiction"
+            # Few completed iterations mean one of two things: the ramp was
+            # too short (the curve is fiction), or the system could not
+            # keep up (the breaking point, which is the result). The
+            # second case shows up as a pile of dropped requests: k6
+            # wanted to send them and the server would not take them.
+            dropped_n = metric_count(m.get("dropped_iterations"))
+            if dropped_n >= max(min_points, n):
+                details.append(
+                    f"{slug}: saturated — {n} completed, {dropped_n} dropped "
+                    f"(the server could not keep up; that is the breaking "
+                    f"point, not a broken curve)")
+                continue
+            return False, (f"{slug}: only {n} latency samples (< {min_points}) "
+                           f"and {dropped_n} dropped: curve is fiction")
         details.append(f"{slug}: {n} latency samples")
     return True, "; ".join(details)
 
@@ -139,9 +204,10 @@ def check_server_requests():
         server = disk.get("server_requests")
         if server is None:
             return False, f"{disk['module']}: driver never recorded server_requests"
-        # Match disk module name (e.g. "postgres/jsonb") to summary slug
-        # (e.g. "postgres-jsonb") by replacing "/" with "-".
-        slug = disk["module"].replace("/", "-")
+        # Match disk module name (e.g. "postgres/jsonb") plus filesystem (e.g.
+        # "xfs") to the summary slug (e.g. "postgres-jsonb-xfs"). Same rule as
+        # shared/leg.py.
+        slug = leg_slug(disk["module"], disk.get("fs"))
         s = summaries.get(slug)
         client = None
         if s:
@@ -151,15 +217,23 @@ def check_server_requests():
             for key in ("http_reqs", "http_requests", "iterations"):
                 m = metrics.get(key)
                 if m:
-                    client = m.get("values", {}).get("count", 0)
+                    client = metric_count(m)
                     break
         if client is None:
-            worst.append(f"{disk['module']}: no k6 client count in summary-{slug}.json")
+            dropped = metric_count(summaries.get(slug, {}).get("metrics", {})
+                                   .get("dropped_iterations"))
+            if dropped:
+                worst.append(f"{disk['module']}: saturated — {dropped} requests "
+                             f"dropped, no completed request to compare")
+            else:
+                worst.append(f"{disk['module']}: no k6 client count in "
+                             f"summary-{slug}.json")
             continue
         gap = client - server
         tol = max(50, int(client * 0.05))
         status = "ok" if 0 <= gap <= tol else "GAP"
-        worst.append(f"{disk['module']}: client={client} server={server} "
+        label = disk["module"] + (f" on {disk['fs']}" if disk.get("fs") else "")
+        worst.append(f"{label}: client={client} server={server} "
                      f"gap={gap} [{status}]")
     # Non-fatal: pg_stat_statements may not track every normalized query
     # (e.g. xk6-sql prepared statements). Parity passing proves data integrity.

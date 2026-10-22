@@ -1,0 +1,67 @@
+# Index access-method lab on ZFS.
+#
+# The index-lab scenario: ONE table (docs, 10M rows), ONE extra index
+# per leg, on ZFS. Every access method PostgreSQL ships beyond the
+# metrics tables' btree gets the case it claims:
+#
+#   none         the bare btree-only table (write baseline)
+#   btree_name   the incumbent for prefix LIKE (reads only)
+#   brin_time    block-range summary over insertion-ordered created_at
+#   hash_rating  equality-only lookup (overflow-page cost on writes)
+#   gist_point   nearest-neighbor point queries
+#   spgist_point the same kNN case, sp-gist's k-d tree
+#   spgist_name  text prefix search (text_pattern_ops)
+#   gin_trgm     trigram fuzzy LIKE, the only structure that can
+#
+# Each leg: bulk seed (measured), index build over the seeded table
+# (measured), closed-loop INSERTs (per-statement maintenance cost),
+# then the five read shapes from observe.py READ_SHAPES["idxlab"].
+
+id: pg-idxlab-zfs
+systems: [postgres/idxlab]
+filesystems: [zfs]
+legs:
+  - {ix: none,         conns: 16, idxlab: 1}
+  - {ix: btree_name,   conns: 16, idxlab: 1}
+  - {ix: brin_time,    conns: 16, idxlab: 1}
+  - {ix: hash_rating,  conns: 16, idxlab: 1}
+  - {ix: gist_point,   conns: 16, idxlab: 1}
+  - {ix: spgist_point, conns: 16, idxlab: 1}
+  - {ix: spgist_name,  conns: 16, idxlab: 1}
+  - {ix: gin_trgm,     conns: 16, idxlab: 1}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# Closed loop: 16 VUs == 16 connections == the conns leg dimension, the
+# same saturation the pg-shard matrix measured with.
+load:
+  executor: constant_vus
+  duration: 90s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 190
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "20"
+
+size_gb: 60
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  fs_tools: true
+  job_timeout_minutes: 300
+  artifact_days: 180

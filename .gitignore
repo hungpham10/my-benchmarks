@@ -5,3 +5,7 @@ plan.json
 compose.gen.json
 docker-compose.gen.yml
 *.egg-info/
+
+# editor leftovers
+*.swp
+.DS_Store

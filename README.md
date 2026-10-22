@@ -11,30 +11,114 @@ runnable by a reader who distrusts the number.
 
 | Benchmark | Question | Headline |
 | --- | --- | --- |
-| [prom-vs-postgres](prom-vs-postgres/) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [prom-vs-postgres](benchctl/scenarios/prom-vs-pg-load.yaml) | Should metrics live in Prometheus or PostgreSQL? | Prometheus uses **59.9x** less disk; wins 9 of 11 dimensions |
+| [pg-shard-models](benchctl/reports/2026-10-21-pg-user-model-fs.md) | User records: one table, pool-per-schema or table-suffix sharding? | Table sharding **+10%** writes; pool-per-schema buys isolation, not throughput; ranking zfs > ext4 > xfs ≈ btrfs on every model |
+| [pg-shard-scale](benchctl/reports/2026-10-21-pg-user-model-fs.md) | Does the sharding answer change at 50M/100M rows? | N-sweep curve per sharding model, routed reads included |
+| [pg-idxlab](benchctl/reports/2026-10-21-pg-user-model-fs.md) | BRIN / GiST / SP-GiST / hash / GIN-trigram: which index wins which case? | Write tax per access method + five read shapes across four filesystems |
+
+Both scenarios run through the same harness, [benchctl](benchctl/): one driver,
+one envelope, one set of rules about what a number has to be before it can be
+published.
 
 ## Running a benchmark
 
-Each one is self-contained and starts the same way:
-
 ```sh
-cd prom-vs-postgres
-make build
-make bench
+cd benchctl
+make run SCENARIO=scenarios/prom-vs-pg-load.yaml
 ```
 
-`make bench` runs every phase in order and writes `results/report.md`. Phases
-are separately runnable (`make ingest`, `make query`) because they are
-separately diagnosable.
+`make run` writes `results/report.md`. Scenarios are separately runnable
+because they are separately diagnosable. The scenario files are the whole
+catalogue:
+
+| Scenario | What it measures |
+| --- | --- |
+| `scenarios/prom-vs-pg-load.yaml` | Prometheus and both PostgreSQL layouts under one ramp |
+| `scenarios/pg-shard-models-<fs>.yaml` | User-schema sharding models (A/C/B) on one filesystem |
+| `scenarios/pg-shard-scale-<fs>.yaml` | Rows-scale sweep: 50M/100M × sharding model |
+| `scenarios/pg-shard-user.yaml` | Layout × payload-index mode (none/jsonb/gin) on ext4 |
+| `scenarios/pg-idxlab-<fs>.yaml` | Index access-method lab: build/maintenance/read shapes |
 
 There is also a workflow: <kbd>Actions</kbd> → *benchmark* → *Run workflow*.
-`scale=smoke` finishes in about two minutes and checks that the harness still
-runs. `scale=full` takes roughly forty and regenerates `results/`.
+It runs as a matrix — one runner per scenario — and the matrix is built by
+reading `benchctl/scenarios/*.yaml`, so the scenario files are the only
+place a benchmark is declared. Each scenario's `ci` block says how long its
+job may run, how long its results are kept, and whether the runner needs
+the filesystem tooling. Run them all, or one: the *scenario* input takes a
+name, and an empty value means all of them. `pg-shard-user` takes about an
+hour, `pg-shard-models` about ninety minutes, and the FS-gear scenarios
+(`pg-idxlab`) a couple of hours because they build a fresh index over a fresh
+10M-row table on every leg. Nothing runs on a schedule
+and nothing runs on a pull request; a benchmark that runs by itself spends
+the runner's minutes on a result nobody asked for.
 
-`prom-vs-postgres` also ships an optional monitoring stack: cAdvisor, a host
-exporter and both databases' own metrics feed a Grafana dashboard, so a run can
-be judged on what it cost the machine as well as how fast it was. See
-[Watching a run](prom-vs-postgres/README.md#watching-a-run).
+The harness also ships an optional monitoring stack: cAdvisor, a host exporter
+and both databases' own metrics feed a Grafana dashboard, so a run can be judged
+on what it cost the machine as well as how fast it was. See
+[Watching a run](benchctl/README.md#watching-a-run).
+
+## The filesystem loadtest
+
+A container cannot format a filesystem, so the filesystem under test lives on
+the machine that runs the Docker daemon and the container bind-mounts a
+directory inside it:
+
+```
+/mnt/benchctl-fs/fs/xfs.img        sparse file on the runner's disk
+  └─ losetup --direct-io=on        -> /dev/loop0
+       └─ mkfs.xfs                 -> mounted at /mnt/benchctl-fs/mnt/xfs
+            └─ bind mount          -> the container's data directory
+```
+
+`--direct-io=on` is not decoration. Without it the host page cache absorbs
+every write before it reaches the device, and the filesystem under test would
+never touch the disk — the benchmark would be measuring the host's cache.
+
+The matrix covers ext4, XFS, btrfs and ZFS. Each leg runs the same image, the
+same dataset, the same queries and the same envelope; only the filesystem
+changes. `shared/fssetup.py` does the provisioning, and it works on a GitHub
+Actions runner (`sudo` on the runner) and on a macOS box with Colima
+(`colima ssh`). A filesystem that cannot be provisioned on the host — ZFS
+without its kernel module, for instance — is recorded as a gap in
+`results/fs-availability.json` and listed in the report, never silently
+dropped.
+
+### Reads are measured twice, warm and cold
+
+The dataset fits in RAM, so a warm read never reaches the filesystem and no
+read measurement can separate ext4 from ZFS. The scenario therefore runs the
+read path twice: once with the cache warm, and once after the container was
+restarted and the host's page cache dropped, when the read has to go to the
+disk. The cold numbers are the ones where the filesystem is on the critical
+path.
+
+The read shapes are chosen for what they make the storage layer do — a
+sequential scan of the whole table, one metric's rows through the label
+index, and a single series (one index lookup plus a heap fetch).
+
+### The host needs the tools
+
+The filesystems are formatted by the machine that runs the Docker daemon, so
+that machine needs `mkfs` and a ZFS userspace:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
+sudo modprobe zfs        # on Ubuntu: linux-modules-extra-$(uname -r)
+```
+
+With Colima, the packages go into the VM:
+
+```sh
+colima ssh -- sudo apt-get update
+colima ssh -- sudo apt-get install -y e2fsprogs xfsprogs btrfs-progs zfsutils-linux fio
+```
+
+A VM's root filesystem is small — Colima's is 19 GiB — and a full disk does
+not fail cleanly: the kernel returns EIO and the database dies with a
+signal. `shared/fssetup.py` therefore picks the mount with the most room,
+refuses to start without it, and says which disk and how much it needs.
+`colima start --disk N` only applies when the VM is created.
 
 ## What every benchmark here has in common
 

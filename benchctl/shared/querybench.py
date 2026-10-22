@@ -76,11 +76,15 @@ def bench_once(exec_fn, warmup=3, measure=30, max_budget_s=120):
     }
 
 
-def run_all(exec_fn, t_start_ms, t_end_ms, backend, measure=30, max_budget_s=120):
+def run_all(exec_fn, t_start_ms, t_end_ms, backend, measure=30, max_budget_s=120,
+            warmup=3):
     """Run every query in Q.QUERIES through exec_fn.
 
     exec_fn(name, text) -> int rows matched on success, raises on failure.
     backend: "prometheus" | "metrics_jsonb" | "metrics_norm_brin"
+    warmup: discarded iterations before the measured ones. The cold phase
+        runs with warmup=0 and measure=1: the first execution is the one
+        that had to read from the disk.
     Returns dict keyed by query name with intent, winner_expected, promql,
     and measured stats including "empty" (True when query matched no rows,
     meaning latency numbers are not meaningful).
@@ -97,14 +101,21 @@ def run_all(exec_fn, t_start_ms, t_end_ms, backend, measure=30, max_budget_s=120
         if backend == "prometheus":
             text = q["promql"]
         else:
-            text = render_sql(q["sql"][backend], q_start_ms, t_end_ms)
+            sql = q["sql"].get(backend)
+            if sql is None:
+                # Read-contract alias: events_all reuses the norm SQL with
+                # the table name swapped (see driver run.py TABLE_ALIASES).
+                base = "metrics_norm_brin"
+                sql = q["sql"][base].replace(base, backend)
+            text = render_sql(sql, q_start_ms, t_end_ms)
 
         def make_exec(text=text):
             def f():
                 return exec_fn(name, text)
             return f
 
-        stats = bench_once(make_exec(), measure=measure, max_budget_s=max_budget_s)
+        stats = bench_once(make_exec(), warmup=warmup, measure=measure,
+                           max_budget_s=max_budget_s)
         out[name] = {
             "intent": q["intent"],
             "winner_expected": q.get("winner"),

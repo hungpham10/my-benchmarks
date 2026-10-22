@@ -1,35 +1,27 @@
-# benchctl pipeline.
+# The benchctl pipeline.
 #
-# Three ways in, deliberately different:
+# One workflow, one matrix, one runner per scenario. The matrix is not
+# written by hand: a prepare job reads benchctl/scenarios/*.yaml and builds
+# it, so the scenario files are the only place a benchmark is declared. Add
+# a yaml there and it gets a runner, a timeout and an artifact of its own.
 #
-#   pull_request  smoke only (scenarios/smoke.yaml, ~2 min). Validates that a
-#                 change still runs end to end. A full run would make every PR
-#                 unusable.
-#   schedule      nightly full (scenarios/counter-rate.yaml), to catch upstream
-#                 drift in the `:latest` images.
-#   dispatch      manual, full by default, for a deliberate run.
+# Each matrix leg is a separate job on a separate runner, so the scenarios
+# do not share a budget: the filesystem matrix can take an hour without
+# touching the Prometheus run's clock. fail-fast is off for the same
+# reason — one scenario failing should not cancel the others.
 #
-# The system under test is on `:latest`, so numbers describe whatever the tag
-# resolved to on the day. That is why the nightly run exists at all.
+# The scenario's own yaml says how long it may run (timeout_min) and what
+# it needs from the runner (the ci block).
 
 name: benchmark
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/benchmark.yml'
-      - 'benchctl/**'
-  schedule:
-    # 03:17 UTC. Off the hour so it does not queue behind everyone else's
-    # midnight jobs.
-    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
-      scale:
-        description: Benchmark scale
-        type: choice
-        options: [smoke, load, pg, full]
-        default: full
+      scenario:
+        description: Scenarios to run, comma separated (empty = all of them)
+        type: string
+        default: ''
       publish:
         description: Open a PR with the results
         type: boolean
@@ -38,27 +30,113 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # One run at a time. Two concurrent benches would measure each other.
-  group: benchmark-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  bench:
+  prepare:
+    # Reads the scenario files and turns them into the matrix. Cheap, and it
+    # fails here rather than four minutes into a run.
     runs-on: ubuntu-latest
-    # Full scale: up + init (3.6M samples) + k6 ramp (~14 min) + verify.
-    # load-test is ~10 min + init + verify. Keep 120 for safety.
-    timeout-minutes: 120
+    timeout-minutes: 5
 
-    # No default working directory; steps specify their own
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Build the matrix
+        id: build
+        env:
+          # An empty input means "run them all". The filter lives here and
+          # not in the job's `if`: the matrix context is not available there,
+          # because a job's condition is evaluated before the matrix is
+          # expanded.
+          #
+          # A comma-separated list runs several scenarios at once, each on
+          # its own runner.
+          WANT: ${{ inputs.scenario }}
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob
+          import json
+          import os
+          import sys
+
+          import yaml
+
+          want = [w.strip() for w in os.environ.get("WANT", "").split(",")
+                  if w.strip()]
+
+          entries = []
+          for path in sorted(glob.glob("benchctl/scenarios/*.yaml")):
+              with open(path) as f:
+                  s = yaml.safe_load(f)
+              if not s or "id" not in s:
+                  continue
+              if want and s["id"] not in want:
+                  continue
+              ci = s.get("ci") or {}
+              entries.append({
+                  "scenario": s["id"],
+                  # The job's budget, from the scenario's own ci block.
+                  # timeout_min above is the load phase's budget, not the
+                  # job's: one scenario may run three systems.
+                  "timeout_minutes": int(ci.get("job_timeout_minutes") or 60),
+                  "artifact_days": int(ci.get("artifact_days") or 90),
+                  # Filesystem scenarios need loop devices and mkfs tools.
+                  "fs_tools": bool(ci.get("fs_tools")),
+                  # Which runner. GitHub-hosted runners come in fixed sizes
+                  # and the smallest is 4 vCPU / 16 GB; a self-hosted label
+                  # is the way to ask for something else. The measurement
+                  # does not depend on it: the SUT is capped by docker
+                  # limits, so the runner's spare cores stay idle.
+                  "runner": str(ci.get("runner") or "ubuntu-latest"),
+              })
+
+          if not entries:
+              raise SystemExit("no scenario matched: " + ", ".join(want))
+
+          # The matrix travels as {"include": [...]}: that is the shape
+          # GitHub accepts for a matrix built at run time. Anything else
+          # expands to nothing, and the run fails with no job at all.
+          print("matrix=" + json.dumps({"include": entries}))
+
+          # The human-readable version goes to the log, not to the output
+          # file: only "key=value" lines belong in there.
+          for e in entries:
+              print(f"  {e['scenario']}: timeout={e['timeout_minutes']}min, "
+                    f"artifact={e['artifact_days']}d, fs_tools={e['fs_tools']}",
+                    file=sys.stderr)
+          PY
+
+  bench:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    # One run of the same scenario at a time. Two concurrent benches would
+    # measure each other. Different scenarios run at the same time: they are
+    # different measurements.
+    concurrency:
+      group: benchmark-${{ matrix.scenario }}
+      cancel-in-progress: false
 
     permissions:
       contents: write
       pull-requests: write
 
     env:
-      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}
+      BENCH_RUN_ID: gh-${{ github.run_number }}.${{ github.run_attempt }}-${{ matrix.scenario }}
       BENCH_COMMIT: ${{ github.sha }}
+      SCENARIO: scenarios/${{ matrix.scenario }}.yaml
 
     steps:
       - name: Clean workspace
@@ -85,25 +163,33 @@ jobs:
           free -g | head -2
           df -h "$RUNNER_TEMP" | tail -1
 
-      - name: Select scenario
-        # A pull request never runs full, whatever the inputs say.
+      - name: Free runner disk
+        # A stock ubuntu-latest image carries ~20 GB of toolchains this
+        # benchmark never uses, on a runner with ~82 GiB free. The zfs
+        # leg writes the same 11 GB of rows as the others but said yes to
+        # a 70 GiB image, and the runner died with "No space left on
+        # device" (Worker_*.log could not even be flushed). Clear the
+        # caches and unused SDKs before the filesystem image is created.
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
-            echo "smoke (pull_request)"
-          elif [ "${{ inputs.scale }}" = "smoke" ]; then
-            echo 'SCENARIO=scenarios/smoke.yaml' >> "$GITHUB_ENV"
-            echo "smoke (dispatch)"
-          elif [ "${{ inputs.scale }}" = "load" ]; then
-            echo 'SCENARIO=scenarios/load-test.yaml' >> "$GITHUB_ENV"
-            echo "load-test (dispatch)"
-          elif [ "${{ inputs.scale }}" = "pg" ]; then
-            echo 'SCENARIO=scenarios/load-test-pg.yaml' >> "$GITHUB_ENV"
-            echo "load-test-pg (dispatch)"
-          else
-            echo 'SCENARIO=scenarios/counter-rate.yaml' >> "$GITHUB_ENV"
-            echo "full"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean
+          rm -rf "$HOME/.cache/pip" "$HOME/.cache/npm" 2>/dev/null || true
+          docker system prune -af 2>/dev/null || true
+          df -h "$RUNNER_TEMP" | tail -1
+
+      - name: Check the scenario file
+        # The matrix came from these files, but the job runs on a fresh
+        # checkout of the same commit, so the check is cheap insurance
+        # against a scenario that was renamed between the two.
+        run: |
+          if [ ! -f "benchctl/$SCENARIO" ]; then
+            echo "::error::no such scenario file: benchctl/$SCENARIO"
+            ls benchctl/scenarios/ || true
+            exit 1
           fi
+          echo "running $SCENARIO"
 
       - name: Install driver deps
         # The driver runs on the runner (not in a container): it generates
@@ -111,6 +197,29 @@ jobs:
         # the dataset; pyyaml reads scenario + module files; psycopg for
         # postgres init.
         run: pip install numpy cramjam pyyaml 'psycopg[binary]'
+
+      - name: Install filesystem tools
+        # Only a filesystem scenario formats real filesystems on the
+        # runner's loop devices, so only it needs the tools that do it:
+        # xfsprogs and btrfs-progs are not preinstalled, and ZFS needs its
+        # kernel module, which on the runner's kernel comes from
+        # linux-modules-extra rather than from the kernel image the runner
+        # booted.
+        #
+        # The extra-modules package is best effort: it does not exist for
+        # every kernel a runner might boot, and a missing ZFS module is
+        # recorded as a gap in the results, not as a failed run.
+        if: matrix.fs_tools
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            e2fsprogs xfsprogs btrfs-progs f2fs-tools zfsutils-linux fio
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" \
+            || echo "::warning::no linux-modules-extra for kernel $(uname -r)"
+          sudo modprobe loop || true
+          sudo modprobe zfs || true
+          echo "loop devices: $(ls /dev/loop* 2>/dev/null | wc -l)"
+          echo "zfs module: $(lsmod | grep -c '^zfs' || true)"
 
       - name: Run the benchmark
         # Start from an empty results/, not just missing files. A run that
@@ -145,20 +254,33 @@ jobs:
           (docker compose -f ../monitoring/compose.monitoring.yml down -v || docker-compose -f ../monitoring/compose.monitoring.yml down -v) 2>/dev/null || true
           docker network rm benchctl-mon 2>/dev/null || true
 
+      - name: Tear down the filesystems
+        # The filesystem scenario mounts filesystems on the runner. If the
+        # run died mid-leg, the mount and the loop device are still there.
+        # Only detach ours: `losetup -D` would take every loop device on
+        # the runner with it.
+        if: always() && matrix.fs_tools
+        run: |
+          sudo umount /mnt/benchctl-fs/mnt/* 2>/dev/null || true
+          for dev in $(sudo losetup -a | grep benchctl-fs | cut -d: -f1); do
+            sudo losetup -d "$dev" 2>/dev/null || true
+          done
+          sudo rm -rf /mnt/benchctl-fs 2>/dev/null || true
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ github.run_number }}
+          name: results-${{ matrix.scenario }}-${{ github.run_number }}
           path: benchctl/results/
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ matrix.artifact_days }}
 
       - name: Summarise
         if: always()
         working-directory: benchctl
         run: |
-          echo "### benchctl summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "### benchctl summary (${{ matrix.scenario }})" >> "$GITHUB_STEP_SUMMARY"
           for f in results/disk-*.json results/verify.json; do
             if [ -f "$f" ]; then
               echo "#### $f" >> "$GITHUB_STEP_SUMMARY"
@@ -175,12 +297,13 @@ jobs:
 
       # Opens a PR rather than pushing to main. Results are evidence, so a run
       # landing on main should be a diff somebody can read rather than a push.
+      # One PR per scenario: each leg has its own results directory.
       - name: Open a PR with the results
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        if: inputs.publish
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = `bench/run-${{ github.run_number }}`;
+            const branch = `bench/run-${{ github.run_number }}-${{ matrix.scenario }}`;
             const cwd = process.env.GITHUB_WORKSPACE;
             const { execSync } = require('child_process');
 
@@ -200,12 +323,12 @@ jobs:
               return;
             }
 
-            const scale = '${{ inputs.scale }}';
-            run(`git commit -m "bench: results from run ${{ github.run_number }} (${scale})"`);
+            const scenario = '${{ matrix.scenario }}';
+            run(`git commit -m "bench: results from run ${{ github.run_number }} (${scenario})"`);
             run(`git push --force origin ${branch}`);
 
             const body = [
-              `Automated results from run ${{ github.run_number }} (${scale} scale).`,
+              `Automated results from run ${{ github.run_number }} (${scenario} scenario).`,
               '',
               `Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
               '',
@@ -218,7 +341,7 @@ jobs:
               repo: context.repo.repo,
               base: base,
               head: branch,
-              title: `bench: results from run ${{ github.run_number }} (${scale})`,
+              title: `bench: results from run ${{ github.run_number }} (${scenario})`,
               body,
             });
             core.info(`Opened PR #${pr.number}: ${pr.html_url}`);
