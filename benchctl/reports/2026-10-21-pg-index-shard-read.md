@@ -105,6 +105,7 @@ during the 90s insert loop. `ANALYZE docs` runs before any read (see
 `index_bytes` is identical on all four filesystems (data, not layout);
 build seconds differ per FS. **The zfs column is 128K recordsize
 (untuned, §7.5)** — read it as "zfs out of the box", not as zfs.
+§3.5 has the same lab re-run at `recordsize=8k`.
 
 | IX | index size | build ext4 | build xfs | build btrfs | build zfs |
 |---|---|---|---|---|---|
@@ -206,16 +207,57 @@ same FS (so FS speed cancels out).
 | gist_point | −3.5% | −6.2% | −2.9% | −13.3% |
 | spgist_point | −3.8% | −11.2% | −0.7% | −20.1% |
 
-- On ext4/btrfs even the heaviest AM costs ≤4%; on xfs 11%; on zfs 20%.
-  The index is not the bottleneck — the commit path is — and the FS
-  determines how much of the index maintenance lands in the measured
-  window.
+- On ext4/btrfs even the heaviest AM costs ≤4%; on xfs 11%; on zfs 20%
+  at the stock 128K. Re-measured at `recordsize=8k` (§3.5) the zfs bill
+  drops to ≤9.5%. The index is not the bottleneck — the commit path is
+  — and the FS determines how much of the index maintenance lands in
+  the measured window.
 - zfs's per-leg numbers here are noisy in absolute terms (this run's
   `none` leg was 4 195 it/s against 8 862 in the 10M matrix); the
   within-run ratio is the only number used.
 - v1 of this lab (before `ANALYZE`) reported "GIN −24%". That was the
   planner scanning a stats-less table; v2 with stats is the number
   above.
+
+### 3.5 zfs re-measured at `recordsize=8k` (run 310)
+
+Every table above uses the stock 128K zfs dataset. After the fix in
+§7.5 the same eight legs were re-run on zfs with `recordsize=8k`:
+
+| | 128K (run 294) | 8k (run 310) |
+|---|---|---|
+| insert loop, `none` leg | 4 195 it/s | 11 734 it/s |
+| worst write tax | −20.1% (`spgist_point`) | −9.5% (`gist_point`) |
+| build btree | 42.2 s | 31.1 s |
+| build gin_trgm | 33.2 s | 19.9 s |
+| build gist_point | 35.9 s | 24.7 s |
+| build spgist_name | 26.7 s | 21.7 s |
+| build spgist_point | 46.3 s | 37.2 s |
+| build brin_time | 16.7 s | 19.4 s |
+| build hash_rating | 29.9 s | 31.7 s |
+| warm BRIN range p50 | 1.36 ms | 0.90 ms |
+| warm hash equality p50 | 0.16 ms | 0.14 ms |
+| warm GiST kNN p50 | 0.31 ms | 0.25 ms |
+
+- **The write tax improvement is real and is a within-run ratio**:
+  −20.1% → −9.5%. With 8 KB records a dirty 8 KB page no longer
+  rewrites a 128 KB record, so index maintenance stops paying the
+  read-modify-write.
+- **The 2.8× absolute insert rate is not a recordsize effect.** The
+  same batch that produced 4 195 it/s measured ext4 at 5 707 it/s,
+  while this batch's zfs `none` leg beats that by 2×. Absolute rates
+  move that much between batches; the ratio inside a batch is the
+  evidence.
+- **Builds improve 19–40% for the metadata-heavy AMs** (btree, GIN,
+  GiST, SP-GiST), while BRIN (a 56 KB build) and hash are flat or
+  slightly worse — consistent with a fixed cost rather than an I/O
+  amplification story.
+- **Cold zfs reads are not reproducible.** The same BRIN range shape
+  measured 71.4 ms in run 294 and 742.7 ms in run 310. Dropping the
+  page cache does not drop the ARC, so "cold" on zfs depends on how
+  much ARC survived the restart. Treat every zfs cold number as a
+  bound, not a measurement; the warm numbers (0.90 vs 1.36 ms) are the
+  usable comparison.
 
 ## 4. Read parallelism — where the knee is
 
@@ -283,8 +325,9 @@ parallel setup cost is amortised.
    slowly" reading came from a 128K recordsize (§7.5) and must not be
    reused.
 4. **The per-index write bill is FS-dependent**: ≤4% on ext4/btrfs,
-   11% on xfs, 20% on zfs for the worst AM (SP-GiST point). BRIN is
-   free within noise and 5 400× smaller.
+   11% on xfs, 20% on 128K zfs for the worst AM (SP-GiST point) —
+   9.5% on zfs at `recordsize=8k` (§3.5). BRIN is free within noise and
+   5 400× smaller.
 5. **Each access method wins exactly its own shape** — BRIN range,
    hash equality, GiST kNN, SP-GiST prefix. Picking "an index" without
    the query shape is how a 1.7 ms range becomes a 3 s scan.
@@ -339,6 +382,9 @@ number:
   was dropped: ~80 GB exceeds the runner disk.
 - zfs at 50M only, and tuned (`recordsize=8k`). 100M zfs is unmeasured:
   the 50M+100M attempt hit the disk ceiling before the recordsize fix.
+- zfs cold-read numbers are not reproducible across runs (71 ms vs
+  743 ms for the same BRIN range); dropping the page cache does not
+  drop the ARC. §3.5 explains why only the warm comparison is used.
 - The 50M zfs leg is the only scale leg whose reads ran with fixed
   shapes; ext4/xfs/btrfs 50M reads predate both fixes and need a rerun
   before any cross-FS read claim at scale.
@@ -358,7 +404,8 @@ number:
 | idxlab 10M, ext4 | `pg-idxlab-ext4` | gh-291 |
 | idxlab 10M, xfs | `pg-idxlab-xfs` | gh-292 |
 | idxlab 10M, btrfs | `pg-idxlab-btrfs` | gh-293 |
-| idxlab 10M, zfs | `pg-idxlab-zfs` | gh-294 |
+| idxlab 10M, zfs (128K) | `pg-idxlab-zfs` | gh-294 |
+| idxlab 10M, zfs (8k) | `pg-idxlab-zfs` | gh-310 |
 | scale 50M/100M, ext4 | `pg-shard-scale-ext4` | gh-295 |
 | scale 50M/100M, xfs | `pg-shard-scale-xfs` | gh-296 |
 | scale 50M/100M, btrfs | `pg-shard-scale-btrfs` | gh-297 |

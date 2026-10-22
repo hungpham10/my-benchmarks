@@ -92,13 +92,14 @@ Two honest notes. First, zfs led at 10M, disappeared from the 50M sweep for a wh
 
 Index build time shows the same filesystem effect more cleanly, because there is no concurrency to hide it:
 
-| Index | build ext4 | build zfs |
-|---|---|---|
-| BRIN on `created_at` | 5.6 s | 16.7 s |
-| GiST on `point` | 10.2 s | 35.9 s |
-| btree on `name` | 24.6 s | 42.2 s |
+| Index | build ext4 | build zfs (128K) | build zfs (8k) |
+|---|---|---|---|
+| BRIN on `created_at` | 5.6 s | 16.7 s | 19.4 s |
+| GiST on `point` | 10.2 s | 35.9 s | 24.7 s |
+| btree on `name` | 24.6 s | 42.2 s | 31.1 s |
+| GIN trigram on `name` | 15.6 s | 33.2 s | 19.9 s |
 
-Same bytes written, 1.3–3.4× the time on zfs — but that zfs column is **untuned 128K recordsize**, the setting that also killed the scale run. With 8 KB records the build picture would improve; I have not re-measured it, so I am not putting a number on it. Even so: the filesystem changes the constant, not the architecture.
+The 8 KB records close most of the metadata-heavy gap (btree 1.3× ext4, GIN 1.3×, GiST still 2.4×) in a separate run, so read those as indicative, not as a controlled A/B. BRIN stays 3.0–3.5× ext4 in both runs, because that build is a fixed cost with almost no I/O to amortise. So it is not "zfs builds slowly"; it is "zfs builds slowly for the AM and record size you configured". The filesystem changes the constant, not the architecture.
 
 Reads behave differently, and this is where the "zfs is fast" claim needs splitting:
 
@@ -157,14 +158,15 @@ BRIN is 5 400× smaller than GiST because it stores block-range summaries instea
 
 The write tax of the others is real but smaller than I expected — and it depends on the filesystem:
 
-| Index | ext4 | xfs | zfs |
-|---|---|---|---|
-| BRIN | −0.6% | −1.1% | −4.4% |
-| btree | −1.3% | −3.4% | +6.1% |
-| GIN | −1.5% | −4.7% | −9.1% |
-| SP-GiST (point) | −3.8% | −11.2% | −20.1% |
+| Index | ext4 | xfs | zfs (128K) | zfs (8k) |
+|---|---|---|---|---|
+| BRIN | −0.6% | −1.1% | −4.4% | +0.3% |
+| btree | −1.3% | −3.4% | +6.1% | −0.5% |
+| GIN | −1.5% | −4.7% | −9.1% | −1.4% |
+| SP-GiST (point) | −3.8% | −11.2% | −20.1% | −4.4% |
+| GiST (point) | −3.5% | −6.2% | −13.3% | −9.5% |
 
-On ext4, even the worst access method costs under 4% of insert throughput, because the transaction still has to wait for one WAL flush either way. On zfs, index maintenance lands in the same window and costs 20%. "Indexes are expensive to write" is true, but the size of the bill is a property of the whole stack.
+On ext4, even the worst access method costs under 4% of insert throughput, because the transaction still has to wait for one WAL flush either way. On zfs at the stock 128K recordsize, index maintenance lands in the same window and costs up to 20%; at 8k the bill drops to 9.5%. "Indexes are expensive to write" is true, but the size of the bill is a property of the whole stack.
 
 Two caveats I will not paper over:
 
