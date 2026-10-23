@@ -198,6 +198,14 @@ def gen_compose(module, cfg, mod_cfg, system, scenario, fs_state=None, extra=Non
     }
     if dep.get("command"):
         sut["command"] = dep["command"]
+    # A setting whose context is postmaster (wal_buffers) cannot be changed
+    # with ALTER SYSTEM + reload: the server ignores the new value until a
+    # restart, and the sweep would record "16MB" while believing it measured
+    # 64MB. Such a leg has to arrive on the command line, and the driver
+    # recreates the container per leg, so this is where it goes.
+    if extra and extra.get("arg_wb"):
+        sut["command"] = list(sut.get("command") or ["postgres"]) + [
+            "-c", f"wal_buffers={extra['arg_wb']}"]
     if ports:
         sut["ports"] = ports
     if volumes:

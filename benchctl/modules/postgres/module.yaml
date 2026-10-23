@@ -26,10 +26,12 @@ deploy:
     - work_mem=8MB
     - -c
     - maintenance_work_mem=256MB
-    - -c
-    - max_wal_size=2GB
-    - -c
-    - min_wal_size=512MB
+    # max_wal_size and min_wal_size are NOT set here. A command-line -c beats
+    # postgresql.auto.conf, so a flag here makes the WAL ceiling unchangeable
+    # for every scenario: the config sweep asked for 8GB and kept measuring
+    # 2GB without complaining. The loader (init.py) applies them with ALTER
+    # SYSTEM instead, defaulting to the values this module always ran
+    # (2GB / 512MB), and a scenario may override them per leg.
     - -c
     - track_io_timing=on
     - -c

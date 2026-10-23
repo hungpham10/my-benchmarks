@@ -25,8 +25,9 @@
 #     the iterations, one random point lookup, on the same connection.
 #
 # Leg keys are short because shared/leg.py builds the result filename from
-# them; init.py maps them to GUCs (SYNC/WB/MWS/MWS_MIN/CKPT) and step.js
-# reads MIX_READ_PCT.
+# them; init.py maps SYNC/MWS/MWS_MIN/CKPT to GUCs, the driver folds ARG_WB
+# into the container command line (wal_buffers is restart-scoped), and
+# step.js reads MIX_READ_PCT.
 
 id: pg-config-sweep
 systems: [postgres/userdb]
@@ -38,7 +39,10 @@ legs:
   # The row the post recommends without measuring it.
   - {layout: A, mode: none, n_users: 2000000, conns: 16, sync: "off"}
   # 4x the default wal_buffers (~16MB, 1/32 of shared_buffers).
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, wb: 64MB}
+  # arg_wb, not ALTER SYSTEM: wal_buffers is postmaster-context, so the value
+  # has to be on the command line and the driver recreates the container per
+  # leg anyway. init.py records the running value either way.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, arg_wb: 64MB}
   # A larger WAL ceiling: fewer forced checkpoints during the 90 s run.
   - {layout: A, mode: none, n_users: 2000000, conns: 16, mws: 8GB, mws_min: 1GB}
   # Half the checkpoints, same WAL ceiling as the baseline.

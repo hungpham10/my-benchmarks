@@ -671,11 +671,15 @@ def init(ahead_minutes=8):
     # ---- per-leg GUC sweep -------------------------------------------
     # A scenario can vary one server setting per leg, which is how the
     # config table stops being folklore:
-    #   sync: off      -> synchronous_commit
-    #   wb: 64MB       -> wal_buffers
-    #   mws: 8GB       -> max_wal_size
-    #   mws_min: 1GB   -> min_wal_size
-    #   ckpt: 30min    -> checkpoint_timeout
+    #   sync: off      -> synchronous_commit      (user context)
+    #   mws: 8GB       -> max_wal_size            (sighup)
+    #   mws_min: 1GB   -> min_wal_size            (sighup)
+    #   ckpt: 30min    -> checkpoint_timeout      (sighup)
+    #
+    # wal_buffers is not here: its context is postmaster, so ALTER SYSTEM +
+    # reload is silently ignored and the sweep would record the default
+    # while believing it measured the new value (it did, once). A leg that
+    # varies it passes `arg_wb` and the driver puts it on the command line.
     #
     # ALTER SYSTEM + reload, not SET: the load phase opens its own
     # connections, so a session-level SET in the loader would never reach
@@ -687,14 +691,19 @@ def init(ahead_minutes=8):
     # value with a space or an "=" in it would make that path ugly.
     tuning_env = {
         "SYNC": "synchronous_commit",
-        "WB": "wal_buffers",
         "MWS": "max_wal_size",
         "MWS_MIN": "min_wal_size",
         "CKPT": "checkpoint_timeout",
     }
-    tuned = {}
+    # max_wal_size / min_wal_size used to live on the module's command line,
+    # where postgresql.auto.conf can never win. They moved here, so a leg can
+    # vary them; the defaults below are the values the module always ran.
+    tuning_defaults = {"max_wal_size": "2GB", "min_wal_size": "512MB"}
+    apply_gucs = {}
     for env_key, guc in tuning_env.items():
         value = (os.environ.get(env_key) or "").strip()
+        if not value:
+            value = tuning_defaults.get(guc, "")
         if not value:
             continue
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
@@ -702,15 +711,53 @@ def init(ahead_minutes=8):
         # ALTER SYSTEM takes no bind parameters; the value is already
         # restricted to [A-Za-z0-9_.-], so quoting it is the whole guard.
         cur.execute(f"ALTER SYSTEM SET {guc} = '{value}'")
-        tuned[guc] = value
-    if tuned:
+        apply_gucs[guc] = value
+
+    if apply_gucs:
         cur.execute("SELECT pg_reload_conf()")
-        # Read the values back: a misspelled value is silently clamped or
-        # rejected at reload time, and the report must show what ran.
-        for guc in tuned:
-            cur.execute(f"SHOW {guc}")
-            tuned[guc] = cur.fetchone()[0]
-        print(f"[init] tuned: {tuned}", flush=True)
+        # Reload is asynchronous and this backend keeps the value it started
+        # with, so SHOW here would return the stale one (it did: the first
+        # sweep recorded synchronous_commit=on for the leg that ran 'off').
+        # A new connection sees postgresql.auto.conf, which is what the load
+        # phase will get. Retry briefly while the postmaster applies the
+        # signal.
+        deadline = time.monotonic() + 5
+        while True:
+            probe = psycopg.connect(dsn, autocommit=True)
+            try:
+                with probe.cursor() as pc:
+                    readback = {}
+                    for guc in apply_gucs:
+                        pc.execute(f"SHOW {guc}")
+                        readback[guc] = pc.fetchone()[0]
+            finally:
+                probe.close()
+            if readback == apply_gucs or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        # A value the server clamped or refused must be visible as such, not
+        # silently replaced by the default. This check is what caught
+        # wal_buffers being postmaster-context.
+        mismatched = {g: (apply_gucs[g], readback[g]) for g in apply_gucs
+                      if readback.get(g) != apply_gucs[g]}
+        if mismatched:
+            print(f"[init] WARNING: GUC read-back differs (asked, got): "
+                  f"{mismatched}", flush=True)
+        tuned = readback
+    else:
+        tuned = {}
+
+    # wal_buffers cannot be changed after start, so it is recorded from the
+    # running server instead of requested: whatever the leg's command line
+    # said is what the load will get, and the report can prove it.
+    probe = psycopg.connect(dsn, autocommit=True)
+    try:
+        with probe.cursor() as pc:
+            pc.execute("SHOW wal_buffers")
+            tuned["wal_buffers"] = pc.fetchone()[0]
+    finally:
+        probe.close()
+    print(f"[init] tuned: {tuned}", flush=True)
 
     if t_start_ms and t_end_ms:
         ensure_partitions(cur, t_start_ms, t_end_ms)

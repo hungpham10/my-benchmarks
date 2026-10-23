@@ -314,7 +314,10 @@ jobs:
 
             const base = process.env.GITHUB_REF_NAME || 'main';
             run(`git checkout -b ${branch}`);
-            run(`git add benchctl/results`);
+            // -f: benchctl/results is gitignored for local runs, and
+            // `git add` refuses an ignored path. The publish step is the one
+            // place those files are meant to be committed.
+            run(`git add -f benchctl/results`);
 
             // Nothing changed: the recorded run reproduces exactly.
             const staged = run(`git diff --cached --name-only`).trim();
