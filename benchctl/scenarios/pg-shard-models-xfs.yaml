@@ -22,6 +22,11 @@ systems: [postgres/userdb]
 filesystems: [xfs]
 legs:
   - {layout: A, mode: none, conns: 16}
+  # The config question, on this filesystem: same M0 leg with the WAL wait
+  # removed. Adjacent to its baseline on purpose — the sweep showed a 7-8%
+  # drift across a 30-minute job, so a pair read 20 minutes apart would
+  # measure the runner, not synchronous_commit.
+  - {layout: A, mode: none, conns: 16, sync: "off"}
   - {layout: C, mode: none, pools: 8,  conns: 16}
   - {layout: C, mode: none, pools: 32, conns: 16}
   - {layout: B, mode: none, shards: 32, conns: 16}
