@@ -1,0 +1,12 @@
+{
+ "t_start_ms": 1792731043891,
+ "t_end_ms": 1792733743891,
+ "total_samples": 3600000,
+ "interval_seconds": 15,
+ "window_minutes": 45,
+ "ahead_minutes": 8,
+ "seed": 20240101,
+ "targets": [
+  "postgres/userdb"
+ ]
+}
