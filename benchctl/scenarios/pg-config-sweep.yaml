@@ -10,14 +10,19 @@
 #
 # and one question the post admits it never measured: reads and writes
 # sharing the workload. This scenario runs one M0 layout (one users table,
-# one pool of 16) and varies exactly one server setting per leg. Everything
-# else — rows, rows/s target, load shape, machine — stays fixed, because a
-# sweep is only a comparison if one thing moves.
+# one pool of 16) and varies exactly one server setting per leg.
+#
+# A/B/A, not a straight sweep. The first CI version ran baseline first and
+# every config after it; the last three legs all came out 7-8% below a
+# baseline they should have tied with, which is drift on the runner, not a
+# setting. A baseline leg now sits between each config leg, so a delta is
+# read against the mean of its two neighbours. Same reason the filesystem
+# matrix runs two rounds.
 #
 # What this can and cannot answer:
 #   - It answers direction and rough size for this workload on this runner.
 #     The absolute rows/s is not comparable with the 10M-row runs: this
-#     seeds 2M so six legs fit in one job.
+#     seeds 2M so nine legs fit in one job.
 #   - It does not re-open the filesystem question. No `filesystems:` key
 #     means every leg runs on the runner's own disk, and that is the
 #     constant this scenario needs.
@@ -27,28 +32,31 @@
 # Leg keys are short because shared/leg.py builds the result filename from
 # them; init.py maps SYNC/MWS/MWS_MIN/CKPT to GUCs, the driver folds ARG_WB
 # into the container command line (wal_buffers is restart-scoped), and
-# step.js reads MIX_READ_PCT.
+# step.js reads MIX_READ_PCT. `blk` exists only to keep the repeated
+# baselines from overwriting each other's results.
 
 id: pg-config-sweep
 systems: [postgres/userdb]
 
 legs:
   # Baseline: the module's own settings (shared_buffers=1GB,
-  # max_wal_size=2GB, wal_buffers default).
-  - {layout: A, mode: none, n_users: 2000000, conns: 16}
+  # max_wal_size=2GB, wal_buffers=16MB by default).
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 1}
   # The row the post recommends without measuring it.
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, sync: "off"}
-  # 4x the default wal_buffers (~16MB, 1/32 of shared_buffers).
-  # arg_wb, not ALTER SYSTEM: wal_buffers is postmaster-context, so the value
-  # has to be on the command line and the driver recreates the container per
-  # leg anyway. init.py records the running value either way.
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, arg_wb: 64MB}
-  # A larger WAL ceiling: fewer forced checkpoints during the 90 s run.
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, mws: 8GB, mws_min: 1GB}
-  # Half the checkpoints, same WAL ceiling as the baseline.
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, ckpt: 30min}
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 2, sync: "off"}
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 3}
+  # 4x the default wal_buffers. arg_wb, not ALTER SYSTEM: wal_buffers is
+  # postmaster-context, so the value has to be on the command line and the
+  # driver recreates the container per leg anyway.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 4, arg_wb: 64MB}
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 5}
+  # A larger WAL ceiling: fewer forced checkpoints during the 60 s run.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 6, mws: 8GB, mws_min: 1GB}
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 7}
+  # Four times the default checkpoint interval (5 min), same WAL ceiling.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 8, ckpt: 30min}
   # Mixed workload: 50% of iterations also serve a point lookup.
-  - {layout: A, mode: none, n_users: 2000000, conns: 16, mix_read_pct: 50}
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, blk: 9, mix_read_pct: 50}
 
 envelope:
   cpus: "4"
@@ -66,7 +74,7 @@ load:
 thresholds:
   p95_ms: 2000
 
-timeout_min: 100
+timeout_min: 150
 
 env:
   QBENCH_MEASURE: "20"
@@ -80,5 +88,5 @@ dataset:
   seed: 20240101
 
 ci:
-  job_timeout_minutes: 120
+  job_timeout_minutes: 150
   artifact_days: 180
