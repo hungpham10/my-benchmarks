@@ -38,7 +38,6 @@ legs:
 #   mws    max_wal_size=8GB, min_wal_size=1GB
 #   ckpt   checkpoint_timeout=30min
 #   mix    50% of insert iterations also serve a point lookup
-#   arc    zfs_arc_max=256MB, to test whether "zfs is fast" is the cache
   - {layout: A, mode: none, conns: 16, baseline: 1}
   - {layout: A, mode: none, conns: 16, sync: "off"}
   - {layout: A, mode: none, conns: 16, baseline: 2}
@@ -48,8 +47,6 @@ legs:
   - {layout: A, mode: none, conns: 16, baseline: 4}
   - {layout: A, mode: none, conns: 16, ckpt: 30min}
   - {layout: A, mode: none, conns: 16, baseline: 5}
-  - {layout: A, mode: none, conns: 16, arc_max_mb: 256}
-  - {layout: A, mode: none, conns: 16, baseline: 6}
   - {layout: A, mode: none, conns: 16, mix_read_pct: 50}
   - {layout: C, mode: none, pools: 8,  conns: 16}
   - {layout: C, mode: none, pools: 32, conns: 16}
