@@ -14,6 +14,12 @@
 # what makes the FS ranking model-dependent: each k6 arrival is one small
 # commit, measured directly against btrfs.
 #
+# The config legs live here too, one per server setting, instead of in a
+# separate scenario: the question "does this setting matter" is incomplete
+# until it has a filesystem attached, and this file already carries one.
+# The knob is applied by the module's init (SYNC/WB/MWS/CKPT/MIX_READ_PCT)
+# and the running value is recorded in the leg's result.
+#
 # Sibling scenarios: the same legs run on the other filesystems; the
 # index question (none / jsonb / gin) is pg-shard-user.yaml.
 
@@ -22,11 +28,20 @@ systems: [postgres/userdb]
 filesystems: [btrfs]
 legs:
   - {layout: A, mode: none, conns: 16}
-  # The config question, on this filesystem: same M0 leg with the WAL wait
-  # removed. Adjacent to its baseline on purpose — the sweep showed a 7-8%
-  # drift across a 30-minute job, so a pair read 20 minutes apart would
-  # measure the runner, not synchronous_commit.
+  # The config legs, on this filesystem. Every one changes a single server
+  # setting against the M0 leg directly above it, so a delta is read over
+  # minutes instead of across the job: the runner drifted 7-8% over a
+  # 30-minute sweep, which is larger than the effect being measured.
+  #   sync   synchronous_commit=off      (user context)
+  #   arg_wb wal_buffers=64MB            (postmaster; command line, not ALTER SYSTEM)
+  #   mws    max_wal_size=8GB, min_wal_size=1GB
+  #   ckpt   checkpoint_timeout=30min
+  #   mix    50% of insert iterations also serve a point lookup
   - {layout: A, mode: none, conns: 16, sync: "off"}
+  - {layout: A, mode: none, conns: 16, arg_wb: 64MB}
+  - {layout: A, mode: none, conns: 16, mws: 8GB, mws_min: 1GB}
+  - {layout: A, mode: none, conns: 16, ckpt: 30min}
+  - {layout: A, mode: none, conns: 16, mix_read_pct: 50}
   - {layout: C, mode: none, pools: 8,  conns: 16}
   - {layout: C, mode: none, pools: 32, conns: 16}
   - {layout: B, mode: none, shards: 32, conns: 16}
@@ -66,6 +81,6 @@ dataset:
   seed: 20240101
 
 ci:
-  job_timeout_minutes: 150
+  job_timeout_minutes: 240
   artifact_days: 180
   fs_tools: true
