@@ -1,0 +1,7 @@
+{
+ "scenario": "pg-config-sweep.yaml",
+ "run_id": "gh-313.1-pg-config-sweep",
+ "total_samples": 3600000,
+ "interval_seconds": 15,
+ "window_minutes": 45
+}

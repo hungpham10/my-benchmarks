@@ -1,0 +1,8 @@
+{
+ "module": "postgres/userdb",
+ "fs": "",
+ "extra": "conns16-layoutA-modenone-n_users2000000-syncoff",
+ "run_id": "gh-313.1-pg-config-sweep",
+ "samples": 2000000,
+ "sum": 2000000.0
+}
