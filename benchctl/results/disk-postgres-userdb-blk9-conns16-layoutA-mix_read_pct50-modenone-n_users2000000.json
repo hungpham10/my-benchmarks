@@ -1,0 +1,25 @@
+{
+ "module": "postgres/userdb",
+ "fs": "",
+ "extra": "blk9-conns16-layoutA-mix_read_pct50-modenone-n_users2000000",
+ "run_id": "gh-314.1-pg-config-sweep",
+ "samples": 2000000,
+ "seconds": 23.9,
+ "samples_per_second": 83620.3,
+ "analyze_seconds": 0.3,
+ "requests": 1,
+ "layout": "A",
+ "mode": "none",
+ "shard_n": 32,
+ "tuned": {
+  "max_wal_size": "2GB",
+  "min_wal_size": "512MB",
+  "wal_buffers": "16MB"
+ },
+ "sum": 2000000.0,
+ "init_seconds": 24.5,
+ "bytes_on_disk": 1144745464,
+ "bytes_per_sample": 572.373,
+ "server_requests": 665547,
+ "k6_exit_code": 0
+}

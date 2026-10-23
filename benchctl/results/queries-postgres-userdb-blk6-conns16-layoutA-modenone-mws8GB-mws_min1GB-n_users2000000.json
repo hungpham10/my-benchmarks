@@ -1,0 +1,21 @@
+{
+ "module": "postgres/userdb",
+ "fs": "",
+ "extra": "blk6-conns16-layoutA-modenone-mws8GB-mws_min1GB-n_users2000000",
+ "run_id": "gh-314.1-pg-config-sweep",
+ "login": {
+  "p50_ms": 0.12,
+  "p95_ms": 1.29,
+  "max_ms": 1.29
+ },
+ "by_id": {
+  "p50_ms": 0.11,
+  "p95_ms": 0.42,
+  "max_ms": 0.42
+ },
+ "recent": {
+  "p50_ms": 67.85,
+  "p95_ms": 79.64,
+  "max_ms": 79.64
+ }
+}

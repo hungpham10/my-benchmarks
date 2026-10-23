@@ -1,0 +1,8 @@
+{
+ "module": "postgres/userdb",
+ "fs": "",
+ "extra": "blk9-conns16-layoutA-mix_read_pct50-modenone-n_users2000000",
+ "run_id": "gh-314.1-pg-config-sweep",
+ "samples": 2000000,
+ "sum": 2000000.0
+}

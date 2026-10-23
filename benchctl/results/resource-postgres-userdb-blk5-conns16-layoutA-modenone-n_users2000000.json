@@ -1,0 +1,10 @@
+{
+ "module": "postgres/userdb",
+ "fs": "",
+ "extra": "blk5-conns16-layoutA-modenone-n_users2000000",
+ "run_id": "gh-314.1-pg-config-sweep",
+ "leg_seconds": 64.3,
+ "cpu_core_avg": null,
+ "mem_bytes_max": null,
+ "mem_max_mb": null
+}
