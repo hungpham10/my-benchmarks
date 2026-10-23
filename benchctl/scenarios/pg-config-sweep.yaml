@@ -1,0 +1,80 @@
+# The config table in the Postgres sizing post, measured instead of assumed.
+#
+# Four of the rows in "The minimum viable production config" were standard
+# advice with no number behind them:
+#
+#   synchronous_commit=off   "affects writes mostly"
+#   wal_buffers              "same size as the filesystem page cache"
+#   max_wal_size             }
+#   checkpoint_timeout       }  same row
+#
+# and one question the post admits it never measured: reads and writes
+# sharing the workload. This scenario runs one M0 layout (one users table,
+# one pool of 16) and varies exactly one server setting per leg. Everything
+# else — rows, rows/s target, load shape, machine — stays fixed, because a
+# sweep is only a comparison if one thing moves.
+#
+# What this can and cannot answer:
+#   - It answers direction and rough size for this workload on this runner.
+#     The absolute rows/s is not comparable with the 10M-row runs: this
+#     seeds 2M so six legs fit in one job.
+#   - It does not re-open the filesystem question. No `filesystems:` key
+#     means every leg runs on the runner's own disk, and that is the
+#     constant this scenario needs.
+#   - The mixed leg is a first number, not a model: one insert and, on half
+#     the iterations, one random point lookup, on the same connection.
+#
+# Leg keys are short because shared/leg.py builds the result filename from
+# them; init.py maps them to GUCs (SYNC/WB/MWS/MWS_MIN/CKPT) and step.js
+# reads MIX_READ_PCT.
+
+id: pg-config-sweep
+systems: [postgres/userdb]
+
+legs:
+  # Baseline: the module's own settings (shared_buffers=1GB,
+  # max_wal_size=2GB, wal_buffers default).
+  - {layout: A, mode: none, n_users: 2000000, conns: 16}
+  # The row the post recommends without measuring it.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, sync: "off"}
+  # 4x the default wal_buffers (~16MB, 1/32 of shared_buffers).
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, wb: 64MB}
+  # A larger WAL ceiling: fewer forced checkpoints during the 90 s run.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, mws: 8GB, mws_min: 1GB}
+  # Half the checkpoints, same WAL ceiling as the baseline.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, ckpt: 30min}
+  # Mixed workload: 50% of iterations also serve a point lookup.
+  - {layout: A, mode: none, n_users: 2000000, conns: 16, mix_read_pct: 50}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# Closed loop, VU count == pool size: the same shape as the layout matrix,
+# so the write path (one commit per arrival) is what is being measured, not
+# an arrival-rate queue.
+load:
+  executor: constant_vus
+  duration: 60s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 100
+
+env:
+  QBENCH_MEASURE: "20"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 120
+  artifact_days: 180

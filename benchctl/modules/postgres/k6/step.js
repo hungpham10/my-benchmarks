@@ -46,6 +46,16 @@ const POOLS = parseInt(__ENV.POOLS || '0', 10);
 const IDXLAB = __ENV.IDXLAB === '1';
 const INSERT_MODE = LAYOUT !== '' || POOLS > 0 || IDXLAB;
 
+// MIX_READ_PCT: share of insert iterations that also serve the point
+// lookup the application runs between sign-ups. Every read number in the
+// other scenarios comes from a quiet database; this leg is the first one
+// where reads and writes share the same connection and the same 90 s.
+// It only compares against itself: same scenario, same runner, same leg
+// shape, one number different.
+const MIX_READ_PCT = parseInt(__ENV.MIX_READ_PCT || '0', 10);
+// Seeded population, for a read key that is not the row just written.
+const SEEDED = parseInt(__ENV.N_USERS || __ENV.K6_UID_MAX || '9999999', 10);
+
 function targetTable(uid, vuIdx) {
   if (POOLS > 0 || LAYOUT === 'C') {
     // M1: pool == schema, one users table per schema. POOLS comes from
@@ -118,6 +128,17 @@ export function step() {
     // INSERT returns no rows; anything but success throws here.
     conn.query(insertSql(uid, table));
     check(uid, { 'insert ok': (u) => u > 0 });
+    // Mixed leg: a random lookup in the seeded population, not the row just
+    // inserted (reading your own write would measure a cache hit, not a
+    // lookup). Layout A only: with LAYOUT B the read key would have to be
+    // routed to the same table, which is a different question.
+    if (MIX_READ_PCT > 0
+        && (exec.vu.iterationInInstance % 100) < MIX_READ_PCT) {
+      const readUid = 1 + Math.floor(Math.random() * SEEDED);
+      const rows = conn.query(
+        'SELECT user_id, name FROM ' + table + ' WHERE user_id = ' + readUid);
+      check(rows, { 'read ok': (r) => r.length >= 0 });
+    }
     return true;
   }
   const result = conn.query(materialize(QUERY));

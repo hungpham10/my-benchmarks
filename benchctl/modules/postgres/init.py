@@ -12,6 +12,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
 
@@ -667,6 +668,50 @@ def init(ahead_minutes=8):
     cur.execute("SELECT pg_reload_conf()")
     print(f"[init] max_parallel_workers_per_gather = {workers}", flush=True)
 
+    # ---- per-leg GUC sweep -------------------------------------------
+    # A scenario can vary one server setting per leg, which is how the
+    # config table stops being folklore:
+    #   sync: off      -> synchronous_commit
+    #   wb: 64MB       -> wal_buffers
+    #   mws: 8GB       -> max_wal_size
+    #   mws_min: 1GB   -> min_wal_size
+    #   ckpt: 30min    -> checkpoint_timeout
+    #
+    # ALTER SYSTEM + reload, not SET: the load phase opens its own
+    # connections, so a session-level SET in the loader would never reach
+    # them. Every leg starts from a fresh volume, so nothing leaks into
+    # the next leg.
+    #
+    # The keys are short because they are also part of the result
+    # filename (shared/leg.py builds the slug from the leg keys), and a
+    # value with a space or an "=" in it would make that path ugly.
+    tuning_env = {
+        "SYNC": "synchronous_commit",
+        "WB": "wal_buffers",
+        "MWS": "max_wal_size",
+        "MWS_MIN": "min_wal_size",
+        "CKPT": "checkpoint_timeout",
+    }
+    tuned = {}
+    for env_key, guc in tuning_env.items():
+        value = (os.environ.get(env_key) or "").strip()
+        if not value:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise SystemExit(f"{env_key}={value!r} is not a plain GUC value")
+        # ALTER SYSTEM takes no bind parameters; the value is already
+        # restricted to [A-Za-z0-9_.-], so quoting it is the whole guard.
+        cur.execute(f"ALTER SYSTEM SET {guc} = '{value}'")
+        tuned[guc] = value
+    if tuned:
+        cur.execute("SELECT pg_reload_conf()")
+        # Read the values back: a misspelled value is silently clamped or
+        # rejected at reload time, and the report must show what ran.
+        for guc in tuned:
+            cur.execute(f"SHOW {guc}")
+            tuned[guc] = cur.fetchone()[0]
+        print(f"[init] tuned: {tuned}", flush=True)
+
     if t_start_ms and t_end_ms:
         ensure_partitions(cur, t_start_ms, t_end_ms)
 
@@ -685,6 +730,7 @@ def init(ahead_minutes=8):
     # ---- user-management variant: tiny rows, many small transactions --
     if variant == "userdb":
         res = init_userdb(cur)
+        res["tuned"] = tuned
         conn.commit()
         cur.close()
         conn.close()
@@ -693,6 +739,7 @@ def init(ahead_minutes=8):
     # ---- index-lab variant: one table, one access method per leg ------
     if variant == "idxlab":
         res = init_idxlab(cur)
+        res["tuned"] = tuned
         conn.commit()
         cur.close()
         conn.close()
