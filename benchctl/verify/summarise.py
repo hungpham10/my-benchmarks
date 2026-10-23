@@ -37,4 +37,15 @@ for slug in sorted(summaries):
     p50 = round(dur_vals.get("med", 0), 2)
     p95 = round(dur_vals.get("p(95)", 0), 2)
     dropped = d.get("dropped_iterations", {}).get("values", {}).get("count", 0)
-    print(f"{slug}: iterations={iters:,} med={p50}ms p95={p95}ms dropped={dropped:,}")
+    # Hardware fingerprint. Two runs are only comparable when the disk under
+    # them behaves the same; without this line, a 2x difference in fsync
+    # latency reads as a 2x difference in the database.
+    fp = os.path.join(RESULTS, f"fsync-{slug}.json")
+    fsync_note = ""
+    if os.path.exists(fp):
+        f = json.load(open(fp)).get("fio") or {}
+        if f.get("available"):
+            fsync_note = (f"  fsync_p50={f['fdatasync_us_p50']}us"
+                          f" p99={f['fdatasync_us_p99']}us")
+    print(f"{slug}: iterations={iters:,} med={p50}ms p95={p95}ms "
+          f"dropped={dropped:,}{fsync_note}")

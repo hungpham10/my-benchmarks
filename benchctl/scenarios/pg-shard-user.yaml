@@ -1,0 +1,72 @@
+# The plain user-management schema: which physical layout wins when the
+# write is ONE small transaction away from a user signing up?
+#
+# This is the scenario the metrics datasets could not carry: the rows are
+# 100 bytes, not 300; there is no scraping interval to average behind; and
+# every INSERT goes out the door as its own WAL commit. What is under test
+# is the layout's write path at human scale plus its read shapes.
+#
+# The mode dimension separates three problems that are easy to conflate:
+#   none  — no payload column at all. The bare layout cost: 3 indexes +
+#           heap page spread. The purest FS signal.
+#   jsonb — payload present but unindexed. TOAST + row width only.
+#   gin   — payload + GIN jsonb_path_ops. Profile-search write cost.
+#
+# The k6 phase registers users at an arrival rate (one INSERT per arrival,
+# routed user_id % N exactly like an application would). The 10M-row bulk
+# seed from the init phase is what makes the second index interesting:
+# the new users overwrite pages already full of existing rows.
+#
+# The filesystem matrix is pg-shard-user-fs.yaml; here everything runs on
+# one constant filesystem so layout is the only variable.
+
+id: pg-shard-user
+systems: [postgres/userdb]
+shape: counter
+scale: large
+
+legs:
+  - {layout: A, mode: none}
+  - {layout: B, mode: none}
+  - {layout: C, mode: none}
+  - {layout: E, mode: none}
+  - {layout: B, mode: jsonb}
+  - {layout: B, mode: gin}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 50
+  time_unit: 1s
+  stages:
+    - { target: 100, duration: 30s }
+    - { target: 300, duration: 1m }
+  graceful_ramp_down: 15s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 90
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "30"
+
+# The dataset window exists for the framework's bookkeeping only; the
+# userdb init seeds its own N_USERS rows and the k6 leg writes new ones.
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 150
+  artifact_days: 180

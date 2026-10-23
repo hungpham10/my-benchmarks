@@ -14,6 +14,9 @@
 name: postgres
 image: postgres:latest
 
+# The driver calls observe.py readshapes for this module.
+capabilities: [readshapes]
+
 deploy:
   command:
     - postgres
@@ -23,18 +26,37 @@ deploy:
     - work_mem=8MB
     - -c
     - maintenance_work_mem=256MB
-    - -c
-    - max_wal_size=2GB
-    - -c
-    - min_wal_size=512MB
+    # max_wal_size and min_wal_size are NOT set here. A command-line -c beats
+    # postgresql.auto.conf, so a flag here makes the WAL ceiling unchangeable
+    # for every scenario: the config sweep asked for 8GB and kept measuring
+    # 2GB without complaining. The loader (init.py) applies them with ALTER
+    # SYSTEM instead, defaulting to the values this module always ran
+    # (2GB / 512MB), and a scenario may override them per leg.
     - -c
     - track_io_timing=on
     - -c
     - shared_preload_libraries=pg_stat_statements
     - -c
-    - max_connections=100
+    - max_connections=600
+    # max_parallel_workers_per_gather is not set here on purpose. A
+    # command-line -c beats postgresql.auto.conf, so the loader could
+    # never raise it again for the sharding scenario. The loader sets it
+    # instead: 0 by default, and whatever the scenario asks for otherwise.
+    #
+    # Why 0 by default: on one CPU a parallel plan buys nothing and costs
+    # reproducibility. PostgreSQL's parallel workers allocate dynamic
+    # shared memory in /dev/shm, which is 64 MB by default in Docker and is
+    # charged to the container's memory limit. On a heavy query the
+    # allocation fails with "could not resize shared memory segment: No
+    # space left on device" and takes the whole k6 step down with it. One
+    # thread also means the filesystem comparison is not measured through a
+    # scheduler lottery.
     - -c
     - log_min_messages=warning
+  # Docker's /dev/shm is 64 MB by default, and it counts against the
+  # container's memory limit. Give it room so that a session that does
+  # allocate shared memory fails for a real reason, not for a 64 MB default.
+  shm_size: "512m"
   config_files:
     - src: init/01_schema.sql
       dst: /docker-entrypoint-initdb.d/01_schema.sql
@@ -56,7 +78,9 @@ deploy:
 
 k6:
   # Uses shared benchctl-k6 image (built once with xk6-sql + postgres driver)
-  max_vus: 32
+  # 512: the userdb pool-model legs run a closed loop with VU = pool
+  # budget (P x conns, up to 32 x 16); the arrival scenarios stay small.
+  max_vus: 512
   env:
     PG_DSN: "postgres://bench:bench@sut:5432/bench?sslmode=disable"
 
@@ -65,9 +89,10 @@ k6:
 # modules/postgres/observe.py.
 # query_marker is a SQL fragment that the verify check uses to narrow the
 # count to only the bench's queries (so we don't count VACUUM, PL/pgSQL,
-# or unrelated ad-hoc queries). For postgres, we filter by the table name
-# that appears in the rendered SQL.
-query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%'"
+# or unrelated ad-hoc queries). Every table the module loads has to be in
+# here: a table that is missing turns the k6 leg into "client sent 231,
+# server handled 0".
+query_marker: "query LIKE '%metrics_jsonb%' OR query LIKE '%metrics_norm_brin%' OR query LIKE '%metrics_sharded%' OR query LIKE '%events%' OR query LIKE '%users_%' OR query LIKE '%s%users%'"
 
 # observe.py exposes server_requests(filter_sql) and sample_stats(variant).
 requests_module: modules/postgres/observe.py

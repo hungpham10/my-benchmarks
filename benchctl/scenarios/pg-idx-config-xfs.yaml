@@ -1,0 +1,78 @@
+# Index x config x filesystem: which setting wins for which access method?
+#
+# The post's index table says every access method costs under 4% of insert
+# throughput on ext4, and explains it as "the commit waits for one WAL
+# flush either way". That explanation predicts the tax should grow once
+# synchronous_commit=off removes the wait. This scenario tests it on xfs,
+# for every built-in access method, with the default and the off leg
+# adjacent so drift cannot masquerade as an effect.
+#
+# Scale is 5M rows, not the 10M of pg-idxlab-*: sixteen legs at 10M do not
+# fit in one job. Use the deltas here (off vs on, index vs none) as the
+# result; do not compare the absolute rows/s with the 10M table.
+#
+#   none         btree-only table (write baseline)
+#   btree_name   prefix LIKE, the incumbent
+#   brin_time    block-range summary over insertion-ordered created_at
+#   hash_rating  equality-only lookup
+#   gist_point   nearest-neighbour point queries
+#   spgist_point the same kNN case
+#   spgist_name  text prefix with text_pattern_ops
+#   gin_trgm     trigram substring search
+#
+# Leg keys: ix selects the index, sync drives the GUC (init.py reads SYNC).
+
+id: pg-idx-config-xfs
+systems: [postgres/idxlab]
+filesystems: [xfs]
+legs:
+  - {ix: none,         conns: 16, idxlab: 1}
+  - {ix: none,         conns: 16, idxlab: 1, sync: "off"}
+  - {ix: btree_name,   conns: 16, idxlab: 1}
+  - {ix: btree_name,   conns: 16, idxlab: 1, sync: "off"}
+  - {ix: brin_time,    conns: 16, idxlab: 1}
+  - {ix: brin_time,    conns: 16, idxlab: 1, sync: "off"}
+  - {ix: hash_rating,  conns: 16, idxlab: 1}
+  - {ix: hash_rating,  conns: 16, idxlab: 1, sync: "off"}
+  - {ix: gist_point,   conns: 16, idxlab: 1}
+  - {ix: gist_point,   conns: 16, idxlab: 1, sync: "off"}
+  - {ix: spgist_point, conns: 16, idxlab: 1}
+  - {ix: spgist_point, conns: 16, idxlab: 1, sync: "off"}
+  - {ix: spgist_name,  conns: 16, idxlab: 1}
+  - {ix: spgist_name,  conns: 16, idxlab: 1, sync: "off"}
+  - {ix: gin_trgm,     conns: 16, idxlab: 1}
+  - {ix: gin_trgm,     conns: 16, idxlab: 1, sync: "off"}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: constant_vus
+  duration: 90s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 150
+
+env:
+  N_USERS: "5000000"
+  QBENCH_MEASURE: "10"
+
+size_gb: 35
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 240
+  artifact_days: 180
+  fs_tools: true

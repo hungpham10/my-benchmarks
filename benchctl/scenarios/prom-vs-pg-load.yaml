@@ -1,0 +1,61 @@
+# Prometheus against PostgreSQL, under one ramp.
+#
+# One scenario, three systems: Prometheus, PostgreSQL with the jsonb
+# schema, PostgreSQL with the normalised schema (heap + BRIN + a series
+# dimension table). They run the same ramp, the same dataset and the same
+# envelope, one after another, so the comparison is between the systems and
+# not between the runs.
+#
+# CCU here means req/s under the OPEN model (ramping-arrival-rate):
+# k6 generates exactly N requests/s whether or not the server keeps up.
+# When it cannot, dropped_iterations > 0 marks the breaking point.
+# A closed model (fixed VUs) would slow itself down and hide the break.
+
+id: prom-vs-pg-load
+systems: [prometheus, postgres/jsonb, postgres/norm]
+shape: counter
+scale: medium
+
+load:
+  executor: ramping-arrival-rate
+  start_rate: 10
+  time_unit: 1s
+  maxVUs: 32
+  stages:
+    # Start gentle: the PostgreSQL legs need time to warm up, and a ramp
+    # that starts at 200 req/s measures the cold start instead of the
+    # steady state.
+    - { target: 10,  duration: 1m }
+    - { target: 200, duration: 8m }
+    - { target: 2000, duration: 5m }
+  graceful_ramp_down: 30s
+
+thresholds:
+  p95_ms: 500
+
+timeout_min: 45
+
+# Dataset: 20k series x 180 samples = 3.6M samples, 15s interval.
+# Volume comes from cardinality, not window length: Prometheus cannot be
+# backfilled more than ~1h, so a longer window is not loadable.
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+queries:
+  prometheus: 'sum(rate(http_requests_total[5m]))'
+  postgres/jsonb:
+    query: q1_counter_rate
+    table: metrics_jsonb
+  postgres/norm:
+    query: q1_counter_rate
+    table: metrics_norm_brin
+
+# Three systems, one ramp: the job needs longer than a single-system run.
+ci:
+  job_timeout_minutes: 120
+  artifact_days: 90

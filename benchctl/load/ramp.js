@@ -28,14 +28,27 @@ const preAllocatedVUs = Math.min(50, maxVUs);
 
 export const options = {
   scenarios: {
-    ramp: {
-      executor: plan.load.executor,
-      startRate: plan.load.start_rate,
-      timeUnit: plan.load.time_unit,
-      stages: plan.load.stages.map((s) => ({ target: s.target, duration: s.duration })),
-      preAllocatedVUs: preAllocatedVUs,
-      maxVUs: maxVUs,
-    },
+    // Two executor families:
+    //  - arrival-rate (the metrics scenarios): the framework paces at a
+    //    target rate and measures latency against it.
+    //  - constant-vus (the userdb pool models): a CLOSED loop. VUs push
+    //    registrations back to back, so throughput = VUs / latency and
+    //    the VU budget (= P x conns, the app's pool sizing) is the thing
+    //    saturating. Pool saturation is the measurement here.
+    ramp: plan.load.executor === 'constant_vus'
+      ? {
+          executor: 'constant-vus',
+          vus: maxVUs,
+          duration: plan.load.duration || '90s',
+        }
+      : {
+          executor: plan.load.executor,
+          startRate: plan.load.start_rate,
+          timeUnit: plan.load.time_unit,
+          stages: plan.load.stages.map((s) => ({ target: s.target, duration: s.duration })),
+          preAllocatedVUs: preAllocatedVUs,
+          maxVUs: maxVUs,
+        },
   },
   thresholds: {
     // k6 aborts with exit 99 when a threshold breaks: that is the
@@ -53,9 +66,14 @@ export default function () {
 }
 
 export function handleSummary(data) {
-  // One summary file per system so each leg's k6 numbers survive instead of
+  // One summary file per leg so each leg's k6 numbers survive instead of
   // being overwritten by the next leg. plan.system is like "postgres/jsonb";
-  // slug it to "postgres-jsonb" for a safe filename.
-  const slug = (plan.system || 'system').replace(/\//g, '-');
+  // slug it to "postgres-jsonb" for a safe filename. When the scenario has a
+  // filesystem dimension, plan.fs is appended — the same rule as
+  // shared/leg.py, which is what the verifier matches against. plan.extra
+  // carries whatever else the leg varies (the number of shards).
+  const slug = (plan.system || 'system').replace(/\//g, '-')
+    + (plan.fs ? '-' + plan.fs : '')
+    + (plan.extra ? '-' + plan.extra : '');
   return { [`/results/summary-${slug}.json`]: JSON.stringify(data) };
 }

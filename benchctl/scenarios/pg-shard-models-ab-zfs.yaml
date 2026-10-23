@@ -1,0 +1,51 @@
+# A/B pair for stability measurement: baseline vs synchronous_commit=off.
+# Repeated 10x per filesystem to measure runner-to-runner drift and the
+# true effect size of sync=off.
+id: pg-shard-models-ab-zfs
+systems: [postgres/userdb]
+filesystems: [zfs]
+
+legs:
+  - {layout: A, mode: none, conns: 16, run: 1}
+  - {layout: A, mode: none, conns: 16, sync: "off", run: 1}
+  - {layout: A, mode: none, conns: 16, run: 2}
+  - {layout: A, mode: none, conns: 16, sync: "off", run: 2}
+  - {layout: A, mode: none, conns: 16, run: 3}
+  - {layout: A, mode: none, conns: 16, sync: "off", run: 3}
+  - {layout: A, mode: none, conns: 16, run: 4}
+  - {layout: A, mode: none, conns: 16, sync: "off", run: 4}
+  - {layout: A, mode: none, conns: 16, run: 5}
+  - {layout: A, mode: none, conns: 16, sync: "off", run: 5}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+load:
+  executor: constant_vus
+  duration: 90s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 60
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "20"
+
+size_gb: 45
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 60
+  artifact_days: 180

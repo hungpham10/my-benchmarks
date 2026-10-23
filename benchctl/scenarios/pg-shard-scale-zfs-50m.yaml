@@ -1,0 +1,68 @@
+# Rows-scale sweep of the user shard question on ZFS — 50M only.
+#
+# The full pg-shard-scale-zfs scenario (50M + 100M, size_gb 100) was
+# killed after 3h58m with no artifact. The runner log then reported
+# "No space left on device". Cause: the ZFS dataset ran with the stock
+# recordsize=128K while Postgres writes 8 KB pages, so every dirty page
+# became a read-modify-write of a 128K record (up to 16x amplification).
+# fssetup now creates the dataset with recordsize=8k, and this scenario
+# keeps only the 50M pair: enough to test whether ZFS holds its 10M lead
+# at a size where ext4/xfs/btrfs are already measured.
+# N (rows) and sharding are the two dimensions seeded here; the model is
+# the plan's strongest pair: baseline A (one table) vs M2/B (32 tables
+# routed user_id % 32, one pool). Everything runs as a closed loop
+# (constant-vus, vus = 16 conns) and every init leg then answers the
+# ROUTED point lookups (direct table, the way the app queries) beside
+# the framework's UNION view — the read side of "does sharding help".
+#
+# Rows scale 10M (previous matrix) -> 50M. The curve answers:
+#   1. does table sharding's +10% write advantage hold, widen or shrink
+#      as the heap + its 3 indexes grow;
+#   2. does the ROUTED read advantage appear at scale;
+#   3. where the per-connection inbox (fsync lane) dominates and extra
+#      rows stop costing anything.
+#
+# Storage: ~11.2 GB of data per leg; size_gb 45 leaves headroom for COW.
+
+id: pg-shard-scale-zfs-50m
+systems: [postgres/userdb]
+filesystems: [zfs]
+legs:
+  - {layout: A, mode: none, shards: 1,  n_users: 50000000, conns: 16}
+  - {layout: B, mode: none, shards: 32, n_users: 50000000, conns: 16}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# Closed loop: VUs push registrations back to back; saturation at the
+# pool is the measurement, as in the pg-shard-models matrix.
+load:
+  executor: constant_vus
+  duration: 90s
+
+thresholds:
+  p95_ms: 2000
+
+timeout_min: 100
+
+env:
+  QBENCH_MEASURE: "20"
+  SHARD_N: "32"
+
+size_gb: 45
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 170
+  artifact_days: 180
+  fs_tools: true

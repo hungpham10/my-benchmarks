@@ -49,6 +49,17 @@ QUERIES = [
                 )
                 SELECT sum(v - prev + CASE WHEN v < prev THEN prev ELSE 0 END) AS rate
                 FROM d WHERE prev IS NOT NULL""",
+            "metrics_sharded": """
+                WITH d AS (
+                  SELECT m.time AS time, m.value AS v,
+                         lag(m.value) OVER (PARTITION BY m.series_id ORDER BY m.time) AS prev
+                  FROM metrics_sharded m
+                  JOIN series_dim s ON s.id = m.series_id
+                  WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+                    AND s.metric = 'http_requests_total'
+                )
+                SELECT sum(v - prev + CASE WHEN v < prev THEN prev ELSE 0 END) AS rate
+                FROM d WHERE prev IS NOT NULL""",
         },
     },
     {
@@ -67,6 +78,13 @@ QUERIES = [
             "metrics_norm_brin": """
                 SELECT s.job AS job, avg(m.value) AS v
                 FROM metrics_norm_brin m
+                JOIN series_dim s ON s.id = m.series_id
+                WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+                  AND s.metric = 'queue_depth'
+                GROUP BY 1 ORDER BY 1""",
+            "metrics_sharded": """
+                SELECT s.job AS job, avg(m.value) AS v
+                FROM metrics_sharded m
                 JOIN series_dim s ON s.id = m.series_id
                 WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
                   AND s.metric = 'queue_depth'
@@ -96,6 +114,14 @@ QUERIES = [
                 WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
                   AND s.metric = 'queue_depth' AND s.job = 'job-00'
                 GROUP BY 1 ORDER BY 1""",
+            "metrics_sharded": """
+                SELECT s.instance AS instance,
+                       percentile_cont(0.9) WITHIN GROUP (ORDER BY m.value) AS p90
+                FROM metrics_sharded m
+                JOIN series_dim s ON s.id = m.series_id
+                WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+                  AND s.metric = 'queue_depth' AND s.job = 'job-00'
+                GROUP BY 1 ORDER BY 1""",
         },
     },
     {
@@ -114,6 +140,12 @@ QUERIES = [
             "metrics_norm_brin": """
                 SELECT avg(m.value) AS v
                 FROM metrics_norm_brin m
+                JOIN series_dim s ON s.id = m.series_id
+                WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+                  AND s.metric = 'queue_depth' AND s.job = 'job-00'""",
+            "metrics_sharded": """
+                SELECT avg(m.value) AS v
+                FROM metrics_sharded m
                 JOIN series_dim s ON s.id = m.series_id
                 WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
                   AND s.metric = 'queue_depth' AND s.job = 'job-00'""",
@@ -137,6 +169,12 @@ QUERIES = [
                 JOIN series_dim s ON s.id = m.series_id
                 WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
                   AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
+            "metrics_sharded": """
+                SELECT avg(m.value) AS v
+                FROM metrics_sharded m
+                JOIN series_dim s ON s.id = m.series_id
+                WHERE m.time BETWEEN %s::timestamptz AND %s::timestamptz
+                  AND s.metric = 'queue_depth' AND s.instance = 'host-0000'""",
         },
     },
 ]
@@ -145,7 +183,66 @@ QUERIES = [
 # range case rather than repeating q4.
 SHORT_RANGE_MS = 15 * 60 * 1000
 
-BACKENDS = ["prometheus", "metrics_jsonb", "metrics_norm_brin"]
+# User-management read shapes for the read-parallelism sweep (scenario
+# pg-readpool-*): the read side of the userdb schema, so k6 can drive a
+# pure read loop with no INSERT to hide behind. No `%s` placeholders —
+# these lookups are relative to the seeded 10M population, not to a
+# dataset window.
+QUERIES.extend([
+    {
+        "name": "user_login",
+        "intent": "A login: one point lookup on the unique e-mail index. The "
+                  "read shape every user-facing app runs most often.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            # `__UID__` is substituted by k6 before the statement is sent
+            # (step.js materialize()). It must NOT be random() in SQL:
+            # random() is volatile, a volatile qual is not a
+            # pseudo-constant, and the planner therefore refuses the
+            # index — the measured result was a 5s seq scan per login.
+            # The ::citext cast is also load-bearing: citext -> text is
+            # IMPLICIT (contrib/citext/citext--1.4.sql:83) while
+            # text -> citext is only ASSIGNMENT, so an uncast text
+            # expression compares as text = text and misses the index.
+            "users_all": """
+                SELECT user_id, name FROM users_all
+                WHERE email = ('user' || __UID__ || '@example.com')::citext
+                LIMIT 1""",
+        },
+    },
+    {
+        "name": "user_by_id",
+        "intent": "A profile fetch: primary-key point lookup.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            "users_all": """
+                SELECT user_id, email, created_at FROM users_all
+                WHERE user_id = __UID__
+                LIMIT 1""",
+        },
+    },
+    {
+        "name": "user_recent",
+        "intent": "A dashboard count over the last day: range scan on "
+                  "created_at.",
+        "winner": "postgres",
+        "promql": "",
+        "sql": {
+            # sum(user_id) forces heap access. count(*) alone can be
+            # answered by an index-only scan on created_at, which barely
+            # parallelises — the first scan run measured no worker gain
+            # for exactly that reason.
+            "users_all": """
+                SELECT sum(user_id) FROM users_all
+                WHERE created_at > now() - interval '365 days'""",
+        },
+    },
+])
+
+BACKENDS = ["prometheus", "metrics_jsonb", "metrics_norm_brin",
+            "metrics_sharded"]
 
 LABELS = {
     "prometheus": "Prometheus",
@@ -153,4 +250,5 @@ LABELS = {
     "postgres": "PostgreSQL (both schemas)",
     "metrics_jsonb": "Postgres jsonb",
     "metrics_norm_brin": "Postgres norm+BRIN",
+    "metrics_sharded": "Postgres sharded",
 }

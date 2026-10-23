@@ -1,0 +1,92 @@
+# Model x FS matrix leg: user schema on ZFS.
+#
+# The sharding-model x filesystem matrix, one filesystem per job. Four
+# models on the plain user schema (user_id unique, citext email, 3 small
+# indexes, 10M seeded rows):
+#   M0  baseline   - one table, one pool
+#   M1  schema     - P schemas x ONE users table each; user_id % P picks
+#                    the pool; the pool IS the schema; k6 VUs cap at
+#                    P * 16 so saturation happens at the pool
+#   M2  tables     - 32 tables users_XX in one schema, one pool;
+#                    user_id % 32 changes the table name instead
+#
+# Every model runs on THIS filesystem. The fsync-per-arrival question is
+# what makes the FS ranking model-dependent: each k6 arrival is one small
+# commit, measured directly against zfs (ARC capped by fssetup).
+#
+# The config legs live here too, one per server setting, instead of in a
+# separate scenario: the question "does this setting matter" is incomplete
+# until it has a filesystem attached, and this file already carries one.
+# The knob is applied by the module's init (SYNC/WB/MWS/CKPT/MIX_READ_PCT)
+# and the running value is recorded in the leg's result.
+#
+# Sibling scenarios: the same legs run on the other filesystems; the
+# index question (none / jsonb / gin) is pg-shard-user.yaml.
+
+id: pg-shard-models-zfs
+systems: [postgres/userdb]
+filesystems: [zfs]
+legs:
+# Every config leg is bracketed by two identical M0 legs: the delta is read
+# against the mean of its neighbours, so a runner that drifts mid-job cannot
+# turn into a setting that "works". The extra baselines are what make the
+# three null results (wal_buffers, max_wal_size, checkpoint_timeout) a
+# measurement instead of an assumption.
+#
+#   sync   synchronous_commit=off      (user context)
+#   arg_wb wal_buffers=64MB            (postmaster; command line, not ALTER SYSTEM)
+#   mws    max_wal_size=8GB, min_wal_size=1GB
+#   ckpt   checkpoint_timeout=30min
+#   mix    50% of insert iterations also serve a point lookup
+  - {layout: A, mode: none, conns: 16, baseline: 1}
+  - {layout: A, mode: none, conns: 16, sync: "off"}
+  - {layout: A, mode: none, conns: 16, baseline: 2}
+  - {layout: A, mode: none, conns: 16, arg_wb: 64MB}
+  - {layout: A, mode: none, conns: 16, baseline: 3}
+  - {layout: A, mode: none, conns: 16, mws: 8GB, mws_min: 1GB}
+  - {layout: A, mode: none, conns: 16, baseline: 4}
+  - {layout: A, mode: none, conns: 16, ckpt: 30min}
+  - {layout: A, mode: none, conns: 16, baseline: 5}
+  - {layout: A, mode: none, conns: 16, mix_read_pct: 50}
+  - {layout: C, mode: none, pools: 8,  conns: 16}
+  - {layout: C, mode: none, pools: 32, conns: 16}
+  - {layout: B, mode: none, shards: 32, conns: 16}
+
+envelope:
+  cpus: "4"
+  memory: 8G
+  k6_cpus: "1"
+  k6_memory: 1G
+
+# Closed loop (constant-vus): each leg's VU budget is its pool sizing
+# (P x conns, capped by benchctl in gen_plan); the VUs push registrations
+# back to back, so the reported throughput is exactly what the pool
+# model sustains at saturation — the number the app cares about.
+load:
+  executor: constant_vus
+  duration: 90s
+
+thresholds:
+  # Saturation is the point: latency is allowed to climb while the pool
+  # drains; the throughput at 90s is the headline.
+  p95_ms: 2000
+
+timeout_min: 120
+
+env:
+  N_USERS: "10000000"
+  QBENCH_MEASURE: "30"
+  SHARD_N: "32"
+
+dataset:
+  jobs: 20
+  instances_per_job: 500
+  interval_seconds: 15
+  window_minutes: 45
+  ahead_minutes: 8
+  seed: 20240101
+
+ci:
+  job_timeout_minutes: 240
+  artifact_days: 180
+  fs_tools: true
