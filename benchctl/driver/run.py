@@ -9,8 +9,10 @@ directory holds everything module-specific; this file only orchestrates.
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -560,6 +562,18 @@ def main():
                 print(f"[benchctl] fs {fs_type}: {fs_state['mount']} "
                       f"on {fs_state['device']}", flush=True)
 
+        # Per-leg ZFS ARC cap. The pool is created once with the envelope
+        # cap, but the ARC lives in host memory outside the container's
+        # cgroup, so a leg can shrink it to test whether "zfs is fast" is
+        # the filesystem or the cache. Reset on every leg: a cap that
+        # outlives its leg would silently change the next measurement.
+        if fs_type == "zfs":
+            mb = extra.get("arc_max_mb")
+            want = (fssetup.parse_size(f"{mb}M") if mb
+                    else fssetup.parse_size(cfg["envelope"].get("memory", "")))
+            if fssetup.set_arc_max(want):
+                print(f"[benchctl] zfs arc_max={want // 1024 ** 2} MB", flush=True)
+
         module, variant = split_system(system)
         mod_cfg = yaml.safe_load(
             open(os.path.join(ROOT, "modules", module, "module.yaml")))
@@ -702,6 +716,35 @@ def main():
             if fio.get("available"):
                 print(f"[benchctl] fsync (fio): p50 {fio['fdatasync_us_p50']} us, "
                       f"p99 {fio['fdatasync_us_p99']} us", flush=True)
+            else:
+                print(f"[benchctl] fio fsync benchmark unavailable: "
+                      f"{fio.get('reason')}", flush=True)
+        else:
+            # ext4 is measured on the host's own disk: there is no loop
+            # mount to probe. The loop images every other filesystem uses
+            # live on that same disk, so the fio probe still produces a
+            # comparable hardware fingerprint. Without it, three jobs carry
+            # a fingerprint and the fourth does not, and a cross-run
+            # comparison cannot be gated on "same disk class".
+            print("[benchctl] fsync latency (host disk, no loop mount)", flush=True)
+            probe_dir = tempfile.mkdtemp(prefix=".benchctl-fsync-",
+                                         dir=os.path.dirname(ROOT))
+            try:
+                fio = fssetup.fsync_bench_fio(probe_dir)
+            except Exception as e:  # noqa: BLE001 — probe must not fail a leg
+                fio = {"available": False, "reason": str(e)}
+            finally:
+                shutil.rmtree(probe_dir, ignore_errors=True)
+            json.dump({"module": system, "fs": "host", "run_id": run_id,
+                       "available": False,
+                       "note": "no loop mount; fio probes the host disk",
+                       "fio": fio},
+                      open(os.path.join(RESULTS, f"fsync-{slug}.json"), "w"),
+                      indent=1)
+            if fio.get("available"):
+                print(f"[benchctl] fsync (fio, host): p50 "
+                      f"{fio['fdatasync_us_p50']} us, p99 "
+                      f"{fio['fdatasync_us_p99']} us", flush=True)
             else:
                 print(f"[benchctl] fio fsync benchmark unavailable: "
                       f"{fio.get('reason')}", flush=True)

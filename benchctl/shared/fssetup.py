@@ -593,6 +593,24 @@ def settle(state):
     return True
 
 
+def set_arc_max(arc_max_bytes):
+    """Cap the ZFS ARC at runtime; no-op when the module is not loaded.
+
+    ZFS keeps its cache in host memory, outside the container's cgroup. The
+    envelope caps the container at 8G, but the ARC is not in that cgroup: an
+    uncapped ARC can hold the whole 4 GB dataset, so "zfs is fast" would be a
+    statement about the runner's RAM rather than about the filesystem.
+
+    A leg can shrink the cap to test that; the driver resets it to the
+    envelope value on the next leg so the setting cannot leak.
+    """
+    if not arc_max_bytes:
+        return False
+    p = host_sh(f"echo {int(arc_max_bytes)} > "
+                f"/sys/module/zfs/parameters/zfs_arc_max", check=False)
+    return p.returncode == 0
+
+
 def probe(state):
     """Collect the filesystem's own description of itself, for the record."""
     mount = state["mount"]

@@ -27,20 +27,27 @@ id: pg-shard-models-btrfs
 systems: [postgres/userdb]
 filesystems: [btrfs]
 legs:
+# Every config leg is bracketed by two identical M0 legs: the delta is read
+# against the mean of its neighbours, so a runner that drifts mid-job cannot
+# turn into a setting that "works". The extra baselines are what make the
+# three null results (wal_buffers, max_wal_size, checkpoint_timeout) a
+# measurement instead of an assumption.
+#
+#   sync   synchronous_commit=off      (user context)
+#   arg_wb wal_buffers=64MB            (postmaster; command line, not ALTER SYSTEM)
+#   mws    max_wal_size=8GB, min_wal_size=1GB
+#   ckpt   checkpoint_timeout=30min
+#   mix    50% of insert iterations also serve a point lookup
+#   arc    zfs_arc_max=256MB, to test whether "zfs is fast" is the cache
   - {layout: A, mode: none, conns: 16}
-  # The config legs, on this filesystem. Every one changes a single server
-  # setting against the M0 leg directly above it, so a delta is read over
-  # minutes instead of across the job: the runner drifted 7-8% over a
-  # 30-minute sweep, which is larger than the effect being measured.
-  #   sync   synchronous_commit=off      (user context)
-  #   arg_wb wal_buffers=64MB            (postmaster; command line, not ALTER SYSTEM)
-  #   mws    max_wal_size=8GB, min_wal_size=1GB
-  #   ckpt   checkpoint_timeout=30min
-  #   mix    50% of insert iterations also serve a point lookup
   - {layout: A, mode: none, conns: 16, sync: "off"}
+  - {layout: A, mode: none, conns: 16}
   - {layout: A, mode: none, conns: 16, arg_wb: 64MB}
+  - {layout: A, mode: none, conns: 16}
   - {layout: A, mode: none, conns: 16, mws: 8GB, mws_min: 1GB}
+  - {layout: A, mode: none, conns: 16}
   - {layout: A, mode: none, conns: 16, ckpt: 30min}
+  - {layout: A, mode: none, conns: 16}
   - {layout: A, mode: none, conns: 16, mix_read_pct: 50}
   - {layout: C, mode: none, pools: 8,  conns: 16}
   - {layout: C, mode: none, pools: 32, conns: 16}
