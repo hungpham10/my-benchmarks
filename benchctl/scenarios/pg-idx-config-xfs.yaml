@@ -75,3 +75,4 @@ dataset:
 ci:
   job_timeout_minutes: 240
   artifact_days: 180
+  fs_tools: true
